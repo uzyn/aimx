@@ -669,12 +669,13 @@ mod tests {
     fn sample_config() -> Config {
         force_sandbox_fallback();
         Config {
-            domain: "test.com".to_string(),
+            domains: vec!["test.com".to_string()],
             data_dir: PathBuf::from("/tmp/aimx-test"),
-            dkim_selector: "aimx".to_string(),
+            dkim_selector: Some("aimx".to_string()),
             trust: "none".to_string(),
             trusted_senders: vec![],
             mailboxes: HashMap::new(),
+            per_domain: std::collections::HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
             signature: None,

@@ -1096,7 +1096,7 @@ pub fn display_dns_guidance(
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum DnsVerifyResult {
     Pass,
     Fail(String),
@@ -1475,9 +1475,9 @@ pub fn finalize_setup(
     let config_path = crate::config::config_path();
     let config = if config_path.exists() {
         let mut cfg = Config::load_ignore_warnings(&config_path)?;
-        if cfg.domain != domain {
-            let old_domain = cfg.domain.clone();
-            cfg.domain = domain.to_string();
+        if cfg.default_domain() != domain {
+            let old_domain = cfg.default_domain().to_string();
+            cfg.domains = vec![domain.to_string()];
             for mailbox in cfg.mailboxes.values_mut() {
                 if mailbox.address.ends_with(&format!("@{old_domain}")) {
                     let local_part = mailbox
@@ -1520,12 +1520,13 @@ pub fn finalize_setup(
             },
         );
         let cfg = Config {
-            domain: domain.to_string(),
+            domains: vec![domain.to_string()],
             data_dir: data_dir.to_path_buf(),
-            dkim_selector: dkim_selector.to_string(),
+            dkim_selector: Some(dkim_selector.to_string()),
             trust: default_trust,
             trusted_senders: default_trusted_senders,
             mailboxes,
+            per_domain: HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
             signature: None,
@@ -1604,8 +1605,20 @@ fn ensure_mailbox_dirs(data_dir: &Path, config: &Config) -> Result<(), Box<dyn s
             }
         }
 
-        let inbox = data_dir.join("inbox").join(name);
-        let sent = data_dir.join("sent").join(name);
+        // Route through the canonical storage helper so fresh installs
+        // and post-migration installs both land in the right place. On
+        // a fresh install (no `.layout-version` marker) the helper
+        // returns `<data_dir>/{inbox|sent}/<name>/`; the daemon's
+        // upgrade-migration step relocates these on first start.
+        // Build a synthetic Config view rooted at `data_dir` so the
+        // helper resolves against this caller's path rather than the
+        // process-wide config.
+        let mut synthetic = config.clone();
+        synthetic.data_dir = data_dir.to_path_buf();
+        let inbox =
+            crate::storage::mailbox_storage_path(&synthetic, mb, crate::storage::Folder::Inbox);
+        let sent =
+            crate::storage::mailbox_storage_path(&synthetic, mb, crate::storage::Folder::Sent);
 
         for dir in [&inbox, &sent] {
             std::fs::create_dir_all(dir)?;
@@ -2496,7 +2509,7 @@ pub fn run_setup(
     let config_path = crate::config::config_path();
     let (dkim_selector, enable_ipv6) = if config_path.exists() {
         match Config::load_ignore_warnings(&config_path) {
-            Ok(c) => (c.dkim_selector, c.enable_ipv6),
+            Ok(c) => (c.default_dkim_selector().to_string(), c.enable_ipv6),
             Err(_) => ("aimx".to_string(), false),
         }
     } else {
@@ -2808,16 +2821,16 @@ pub(crate) mod tests {
     use std::collections::HashMap;
     use tempfile::TempDir;
 
-    struct MockNetworkOps {
-        outbound_port25: bool,
-        inbound_port25: bool,
-        server_ipv4: Option<Ipv4Addr>,
-        server_ipv6: Option<Ipv6Addr>,
-        mx_records: HashMap<String, Vec<String>>,
-        a_records: HashMap<String, Vec<IpAddr>>,
-        aaaa_records: HashMap<String, Vec<IpAddr>>,
-        txt_records: HashMap<String, Vec<String>>,
-        get_server_ips_calls: std::cell::Cell<u32>,
+    pub(crate) struct MockNetworkOps {
+        pub(crate) outbound_port25: bool,
+        pub(crate) inbound_port25: bool,
+        pub(crate) server_ipv4: Option<Ipv4Addr>,
+        pub(crate) server_ipv6: Option<Ipv6Addr>,
+        pub(crate) mx_records: HashMap<String, Vec<String>>,
+        pub(crate) a_records: HashMap<String, Vec<IpAddr>>,
+        pub(crate) aaaa_records: HashMap<String, Vec<IpAddr>>,
+        pub(crate) txt_records: HashMap<String, Vec<String>>,
+        pub(crate) get_server_ips_calls: std::cell::Cell<u32>,
     }
 
     impl Default for MockNetworkOps {
@@ -4352,7 +4365,7 @@ owner = "aimx-catchall"
         assert!(tmp.path().join("dkim/public.key").exists());
 
         let config = Config::load_resolved_ignore_warnings().unwrap();
-        assert_eq!(config.domain, "test.example.com");
+        assert_eq!(config.default_domain(), "test.example.com");
         assert!(config.mailboxes.contains_key("catchall"));
         assert_eq!(config.mailboxes["catchall"].address, "*@test.example.com");
     }
@@ -4371,7 +4384,7 @@ owner = "aimx-catchall"
         assert_eq!(key1, key2);
 
         let config = Config::load_resolved_ignore_warnings().unwrap();
-        assert_eq!(config.domain, "test.example.com");
+        assert_eq!(config.default_domain(), "test.example.com");
         assert!(config.mailboxes.contains_key("catchall"));
     }
 
@@ -4449,12 +4462,13 @@ owner = "aimx-catchall"
             },
         );
         let config = Config {
-            domain: "test.example.com".to_string(),
+            domains: vec!["test.example.com".to_string()],
             data_dir: tmp.path().to_path_buf(),
-            dkim_selector: "aimx".to_string(),
+            dkim_selector: Some("aimx".to_string()),
             trust: "none".to_string(),
             trusted_senders: vec![],
             mailboxes,
+            per_domain: std::collections::HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
             signature: None,
@@ -4494,7 +4508,10 @@ owner = "aimx-catchall"
         finalize_setup(tmp.path(), "test.example.com", "aimx", None).unwrap();
 
         let config = Config::load_resolved_ignore_warnings().unwrap();
-        assert!(config.mailboxes.contains_key("alice"));
+        // `create_mailbox` writes FQDN-keyed stanzas so the on-disk
+        // shape matches what the daemon's MAILBOX-CREATE path produces.
+        // The resolver accepts the bare local-part either way.
+        assert!(config.resolve_mailbox_by_name("alice").is_some());
         assert!(config.mailboxes.contains_key("catchall"));
     }
 
@@ -4507,7 +4524,7 @@ owner = "aimx-catchall"
         finalize_setup(tmp.path(), "new.example.com", "aimx", None).unwrap();
 
         let config = Config::load_resolved_ignore_warnings().unwrap();
-        assert_eq!(config.domain, "new.example.com");
+        assert_eq!(config.default_domain(), "new.example.com");
         let catchall = config.mailboxes.get("catchall").unwrap();
         assert_eq!(catchall.address, "*@new.example.com");
     }

@@ -64,6 +64,20 @@ Replace `/usr/local/bin/aimx` and `systemctl restart aimx`. `aimx serve` handles
 
 Same domain, new server: `rsync -a /etc/aimx/ /var/lib/aimx/` to the new host, install the binary, `sudo aimx setup <domain>` (re-entrant, it reuses the existing DKIM key), then flip the A/MX record. Different domain: run a fresh `aimx setup`. The DKIM selector, SPF, and DMARC records all reference the domain and must be regenerated.
 
+## Multi-domain
+
+### Can one AIMX install host multiple domains?
+
+Yes. `aimx domains add <domain>` appends a domain to the `domains` array, generates a per-domain DKIM keypair, prints the DNS records, runs the verification loop, and hot-reloads `aimx serve` with no restart. Each domain has its own DKIM identity, its own catchall (`*@<domain>`), and its own mailboxes. The first entry in `domains` is the default — bare local parts (`agent`, `support`) resolve against it. See [Multi-domain](multi-domain.md).
+
+### I upgraded to the multi-domain build. What changed on disk?
+
+The first `aimx serve` start under the new binary atomically rewrites `config.toml` from `domain = "..."` to `domains = ["..."]`, re-keys every `[mailboxes.<local>]` to `[mailboxes."<local>@<domain>"]`, moves `/var/lib/aimx/inbox/` and `sent/` under `/var/lib/aimx/<domain>/`, and moves the DKIM keys under `/etc/aimx/dkim/<domain>/`. Mail flow resumes after the rename. Semantically the install is identical to before — only the file layout changed. See [Multi-domain: Upgrade migration walkthrough](multi-domain.md#upgrade-migration-walkthrough).
+
+### How do I roll back to a pre-multi-domain binary?
+
+Documented step-by-step in [Multi-domain: Rollback procedure](multi-domain.md#rollback-procedure). The short version: stop the daemon, move storage and DKIM keys back to the v1 paths, hand-edit `config.toml` back to the v1 shape, delete `/var/lib/aimx/.layout-version`, install the older binary, restart.
+
 ## DNS and deliverability
 
 ### What is PTR record? Do I actually need it?

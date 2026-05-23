@@ -58,6 +58,21 @@ Once you have linked up your MCP to your LLM, try asking it to set up a mailbox 
 
 Third-party mail-client workarounds (Gmail spam-filter whitelists and similar) are not part of `aimx setup`. The canonical deliverability story is the SPF / DKIM / DMARC triple plus a reverse-DNS (PTR) record at your VPS provider.
 
+### Adding a second domain
+
+`aimx setup` configures the first domain only. To host a second
+(or third) domain on the same install, run `aimx domains add` after
+setup completes:
+
+```bash
+sudo aimx domains add side-project.com
+```
+
+This generates a per-domain DKIM keypair, prints the DNS records, runs
+the verification loop, and hot-reloads `aimx serve` so `@side-project.com`
+mail is accepted with no service restart. See [Multi-domain](multi-domain.md)
+for the full operator reference.
+
 ### Catchall user
 
 When the catchall is configured, setup creates the `aimx-catchall` system user (`useradd --system --no-create-home --shell /usr/sbin/nologin`, or the BusyBox `adduser` equivalent on Alpine) and chowns the catchall mailbox to it. Skipping the catchall skips the user.
@@ -217,7 +232,7 @@ aimx send \
 DKIM keys are generated automatically during setup. To manage them independently:
 
 ```bash
-# Generate DKIM keypair (default selector: "aimx")
+# Generate DKIM keypair for the default domain (default selector: "aimx")
 aimx dkim-keygen
 
 # Force regenerate (overwrites existing keys)
@@ -225,13 +240,22 @@ aimx dkim-keygen --force
 
 # Use a custom selector
 aimx dkim-keygen --selector mykey
+
+# Target a specific domain on multi-domain installs
+sudo aimx dkim-keygen --domain side-project.com --selector s2025
 ```
 
-Keys are stored at:
-- Private key: `/etc/aimx/dkim/private.key` (mode `0600`, root-only)
-- Public key: `/etc/aimx/dkim/public.key` (mode `0644`)
+Keys are stored under `/etc/aimx/dkim/<domain>/`:
+- Private key: `/etc/aimx/dkim/<domain>/private.key` (mode `0600`, root-only)
+- Public key: `/etc/aimx/dkim/<domain>/public.key` (mode `0644`)
 
-After regenerating keys, update the DKIM DNS record with the new public key.
+Single-domain installs that upgraded from a pre-multi-domain build had
+their keys relocated from `/etc/aimx/dkim/private.key` to
+`/etc/aimx/dkim/<domain>/private.key` automatically on the first
+post-upgrade `aimx serve` start. See [Multi-domain: Upgrade migration walkthrough](multi-domain.md#upgrade-migration-walkthrough).
+
+After regenerating keys, update the DKIM DNS record for that domain with
+the new public key.
 
 ## Production hardening
 

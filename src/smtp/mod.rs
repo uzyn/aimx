@@ -140,7 +140,7 @@ impl SmtpServer {
                     let tls_acceptor = self.tls_acceptor.clone();
                     // Re-read the hostname from the current snapshot so it
                     // tracks any live Config swap.
-                    let hostname = config_handle.load().domain.clone();
+                    let hostname = config_handle.load().default_domain().to_string();
                     let max_message_size = self.max_message_size;
                     let idle_timeout = self.idle_timeout;
                     let total_timeout = self.total_timeout;

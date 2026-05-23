@@ -63,6 +63,7 @@ comrak = { version = "=0.52.0", default-features = false }
 lol_html = "2"
 tempfile = "3"
 sparkv = "0.1"
+arc-swap = "1.9.1"
 
 [dev-dependencies]
 assert_cmd = "2"

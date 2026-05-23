@@ -397,6 +397,170 @@ fn find_daemon_pid() -> Option<i32> {
     if pid > 1 { Some(pid) } else { None }
 }
 
+/// Drive the one-shot multi-domain upgrade migration at daemon startup.
+///
+/// Sequence per the migration design contract:
+///
+/// 1. Detect the layout state. `Migrated` → fast no-op (no locks, no log).
+///    `Corrupted` → hard startup error. `FreshInstall` → write marker only,
+///    no log line. `NeedsMigration` → run the four-step transaction under
+///    the documented lock hierarchy.
+/// 2. For `NeedsMigration`: acquire **outer** per-mailbox locks in
+///    **sorted FQDN order** against the shared [`crate::mailbox_locks::MailboxLocks`]
+///    pool that the rest of the daemon will contend on, then the
+///    **inner** process-wide `CONFIG_WRITE_LOCK` for the config write
+///    sequence. Matches the documented cascade-delete ordering and
+///    prevents deadlocks with concurrent CRUD that comes online once
+///    the listener binds.
+/// 3. Run the migration steps (storage → DKIM → config → marker).
+/// 4. Emit a single operator-visible INFO log line summarising every
+///    file/path that moved.
+/// 5. Return the rewritten `Config` so the rest of `run_serve` operates
+///    on the canonical FQDN-keyed shape.
+async fn run_upgrade_migration_at_startup(
+    config: Config,
+    mailbox_locks: Arc<crate::mailbox_locks::MailboxLocks>,
+) -> Result<Config, Box<dyn std::error::Error>> {
+    let data_dir = config.data_dir.clone();
+    let dkim_dir = crate::config::dkim_dir();
+    let config_path = crate::config::config_path();
+
+    // Pre-flight detection only — cheap, no locks.
+    let pre_state = crate::upgrade_migration::detect_layout_state(
+        &data_dir,
+        &dkim_dir,
+        &config_path,
+        config.default_domain(),
+    );
+    match pre_state {
+        crate::upgrade_migration::LayoutState::Migrated => {
+            // Marker present. No locks, no log, no work.
+            return Ok(config);
+        }
+        crate::upgrade_migration::LayoutState::Corrupted(msg) => {
+            return Err(format!(
+                "upgrade migration failed: {msg}; see book/multi-domain.md for manual recovery"
+            )
+            .into());
+        }
+        crate::upgrade_migration::LayoutState::FreshInstall => {
+            crate::upgrade_migration::write_layout_version_marker(&data_dir).map_err(
+                |e| -> Box<dyn std::error::Error> {
+                    format!(
+                        "upgrade migration failed: {e}; \
+                         see book/multi-domain.md for manual recovery"
+                    )
+                    .into()
+                },
+            )?;
+            return Ok(config);
+        }
+        crate::upgrade_migration::LayoutState::NeedsMigration(_) => {
+            // Fall through to the locked migration body.
+        }
+    }
+
+    // Sorted FQDN list — every mailbox's `address` is the canonical FQDN
+    // even when the in-memory map still uses a legacy local-part key.
+    let mut fqdns: Vec<String> = config
+        .mailboxes
+        .values()
+        .map(|mb| mb.address.clone())
+        .collect();
+    fqdns.sort();
+
+    // Outer: per-mailbox locks from the shared pool, acquired in sorted
+    // FQDN order. Held simultaneously across the migration body so any
+    // future concurrent writer cannot interleave.
+    let states: Vec<Arc<crate::mailbox_locks::MailboxState>> = fqdns
+        .iter()
+        .map(|fqdn| mailbox_locks.lock_for(fqdn))
+        .collect();
+    // Acquire all guards in order. Holding references in `held_guards`
+    // keeps every lock taken until this function returns; the
+    // `states` Vec lives for the same scope and outlives the guards,
+    // so the borrows are valid.
+    let mut held_guards: Vec<tokio::sync::MutexGuard<'_, ()>> = Vec::with_capacity(states.len());
+    for state in &states {
+        held_guards.push(state.lock.lock().await);
+    }
+
+    let outcome = {
+        // Inner: process-wide config write lock. Honor the outer →
+        // inner hierarchy even though the migration is the only writer
+        // at startup.
+        let _config_guard = crate::mailbox_handler::CONFIG_WRITE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        crate::upgrade_migration::run_startup_migration(&data_dir, &dkim_dir, &config_path, &config)
+    };
+    // Locks released here as `held_guards` and `states` go out of scope.
+    drop(held_guards);
+    drop(states);
+
+    match outcome {
+        Ok(crate::upgrade_migration::StartupMigrationOutcome::AlreadyMigrated)
+        | Ok(crate::upgrade_migration::StartupMigrationOutcome::Fresh) => {
+            // We re-detected as `NeedsMigration` but the state changed
+            // under us — should be impossible because no other writer
+            // exists yet, but tolerate it defensively rather than
+            // emitting a spurious log line.
+            Ok(config)
+        }
+        Ok(crate::upgrade_migration::StartupMigrationOutcome::Migrated(inner)) => {
+            let crate::upgrade_migration::MigratedOutcome { report, rewritten } = *inner;
+            let line = crate::upgrade_migration::format_migration_log_line(
+                &report,
+                rewritten.default_domain(),
+            );
+            tracing::info!(target: "aimx::upgrade", "{line}");
+            Ok(rewritten)
+        }
+        Err(e) => Err(format!(
+            "upgrade migration failed: {e}; see book/multi-domain.md for manual recovery"
+        )
+        .into()),
+    }
+}
+
+/// Mailbox-key FQDN re-key absorbed from the upgrade migration.
+///
+/// Rewrites legacy local-part-keyed mailboxes on disk to the canonical
+/// FQDN-keyed shape. Fires on the first start after an upgrade where
+/// the storage + DKIM relocation already ran but the mailbox keys on
+/// disk are still local-part shaped, and no-ops on every subsequent
+/// start (the rewrite leaves the on-disk shape canonical, so the
+/// detector sees zero legacy keys and skips the rewrite).
+///
+/// Holds `CONFIG_WRITE_LOCK` for the rewrite + Arc swap so concurrent
+/// MAILBOX-CRUD requests (none yet at startup) cannot interleave.
+async fn run_mailbox_key_rekey_at_startup(
+    config: Config,
+) -> Result<Config, Box<dyn std::error::Error>> {
+    let config_path = crate::config::config_path();
+    if !crate::upgrade_migration::config_has_legacy_mailbox_keys(&config_path) {
+        return Ok(config);
+    }
+    let _config_guard = crate::mailbox_handler::CONFIG_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let rewritten =
+        crate::upgrade_migration::rewrite_config_to_canonical_shape(&config_path, &config)
+            .map_err(|e| -> Box<dyn std::error::Error> {
+                format!(
+                    "deferred mailbox-key FQDN re-key failed: {e}; \
+             see book/multi-domain.md for manual recovery"
+                )
+                .into()
+            })?;
+    tracing::info!(
+        target: "aimx::upgrade",
+        "deferred mailbox-key FQDN re-key completed: {} mailboxes re-keyed",
+        rewritten.mailboxes.len(),
+    );
+    Ok(rewritten)
+}
+
 pub fn run(
     bind: Option<&str>,
     tls_cert: Option<&str>,
@@ -448,6 +612,27 @@ async fn run_serve(
     // post-write `chown_as_owner`, the file is still not world-readable.
     crate::ownership::set_process_umask(0o077);
 
+    // A single `MailboxLocks` map is shared across every writer (inbound
+    // ingest, MARK-*, MAILBOX-*) so they all serialize on the same
+    // per-mailbox `tokio::sync::Mutex<()>`. Constructed before the
+    // upgrade migration so the migration can document the
+    // outer-CONFIG_WRITE_LOCK → inner-per-mailbox-lock hierarchy against
+    // the same lock pool the rest of the daemon uses.
+    let mailbox_locks = Arc::new(crate::mailbox_locks::MailboxLocks::new());
+
+    // One-shot multi-domain upgrade migration. Runs before any listener
+    // binds and before the datadir README refresh so the README, when
+    // overwritten, reflects the post-migration layout. Idempotent across
+    // restarts (gated by `<data_dir>/.layout-version`).
+    let config = run_upgrade_migration_at_startup(config, Arc::clone(&mailbox_locks)).await?;
+
+    // Mailbox-key FQDN re-key absorbed from the upgrade migration:
+    // legacy local-part-keyed mailboxes on an already-migrated v2 install
+    // get rewritten to canonical `[mailboxes."<local>@<domain>"]` on
+    // first start under the multi-domain runtime data plane. Idempotent
+    // — a second start sees no legacy keys and is a no-op.
+    let config = run_mailbox_key_rekey_at_startup(config).await?;
+
     // Refresh the agent-facing README if the baked-in version differs from
     // what is on disk. Runs before any listener is bound so the file is
     // up-to-date by the time agents read it.
@@ -474,29 +659,69 @@ async fn run_serve(
         );
     }
 
-    // Load DKIM key once at startup. Every accepted UDS send reuses this
-    // in-memory key. A failure here is fatal: the daemon cannot sign
-    // outbound mail without it.
-    let dkim_root = crate::config::dkim_dir();
-    let dkim_key = match dkim::load_private_key(&dkim_root) {
-        Ok(k) => Arc::new(k),
-        Err(e) => {
-            return Err(format!(
-                "Failed to load DKIM private key from {}: {e}. \
-                 `aimx serve` requires a readable DKIM private key \
-                 (generate with `aimx setup` or `aimx dkim-keygen`).",
-                dkim_root.join("private.key").display()
-            )
-            .into());
+    // Build the per-domain DKIM key map at startup. Each entry carries
+    // the per-domain DKIM private key + its resolved selector. The map
+    // is wrapped in `ArcSwap` so future DOMAIN-ADD / DOMAIN-REMOVE verbs
+    // can hot-swap an entry without restarting the daemon.
+    //
+    // A miss for the default domain is fatal (the daemon cannot sign
+    // outbound mail from the default identity without it). Misses for
+    // non-default domains log a warning and the daemon still starts —
+    // outbound from those domains fails with the canonical "no DKIM key
+    // for domain X" error until the operator runs
+    // `aimx dkim-keygen --domain <d>`.
+    let dkim_dir_root = crate::config::dkim_dir();
+    let (initial_dkim_map, dkim_reports) =
+        crate::dkim_keys::load_dkim_keys(&config, &dkim_dir_root);
+    let default_domain_lc = config.default_domain().to_ascii_lowercase();
+    if !initial_dkim_map.contains_key(&default_domain_lc) {
+        return Err(format!(
+            "Failed to load DKIM private key for default domain '{default_domain_lc}'. \
+             `aimx serve` requires a readable DKIM private key. Expected at {} \
+             (per-domain) or {} (legacy single-domain). Generate one with \
+             `aimx setup` or `aimx dkim-keygen --domain {default_domain_lc}`.",
+            dkim_dir_root
+                .join(&default_domain_lc)
+                .join("private.key")
+                .display(),
+            dkim_dir_root.join("private.key").display(),
+        )
+        .into());
+    }
+    for r in &dkim_reports {
+        if let crate::dkim_keys::LoadOutcome::MissingKey { path, error } = &r.outcome
+            && r.domain != default_domain_lc
+        {
+            eprintln!(
+                "{} no DKIM key loaded for domain '{}': {error} (expected at {}). \
+                 Outbound from this domain will fail until `aimx dkim-keygen --domain {}` runs.",
+                term::warn("Warning:"),
+                r.domain,
+                path.display(),
+                r.domain,
+            );
         }
-    };
+    }
+    let dkim_keys_map: crate::dkim_keys::SharedDkimKeyMap =
+        Arc::new(arc_swap::ArcSwap::from_pointee(initial_dkim_map));
 
-    // Compare the on-disk public key to the DNS-published `p=` value.
-    // Never fatal. DNS may not have propagated yet after a fresh setup.
+    // Compare the default-domain on-disk public key to the DNS-published
+    // `p=` value. Never fatal. DNS may not have propagated yet after a
+    // fresh setup. The check still uses the layout-aware DKIM dir
+    // resolver so an install that hasn't moved to the per-domain layout
+    // yet (rare; only fresh installs) is handled correctly.
     let resolver = HickoryDkimResolver;
-    let outcome =
-        run_dkim_startup_check(&resolver, &config.domain, &config.dkim_selector, &dkim_root);
-    log_dkim_startup_check(&outcome, &config.domain, &config.dkim_selector);
+    let primary_domain = config.default_domain().to_string();
+    let primary_selector = crate::dkim_keys::resolve_selector_for_domain(&config, &primary_domain);
+    let dkim_root_for_check =
+        crate::upgrade_migration::resolve_active_dkim_dir(&config, &dkim_dir_root);
+    let outcome = run_dkim_startup_check(
+        &resolver,
+        &primary_domain,
+        &primary_selector,
+        &dkim_root_for_check,
+    );
+    log_dkim_startup_check(&outcome, &primary_domain, &primary_selector);
 
     // Build the SendContext shared across every per-connection UDS task.
     //
@@ -519,7 +744,7 @@ async fn run_serve(
         }
         None => Arc::new(LettreTransport::new(
             config.enable_ipv6,
-            config.domain.clone(),
+            primary_domain.clone(),
         )),
     };
 
@@ -528,22 +753,20 @@ async fn run_serve(
     // through this same handle so MAILBOX-CREATE/DELETE is reflected
     // everywhere at once on a successful atomic `config.toml` write.
     let data_dir = config.data_dir.clone();
-    let dkim_selector = config.dkim_selector.clone();
     let config_handle = ConfigHandle::new(config);
 
     let send_ctx = Arc::new(SendContext {
-        dkim_key,
-        dkim_selector,
+        dkim_keys: Arc::clone(&dkim_keys_map),
         config_handle: config_handle.clone(),
         transport,
         data_dir: data_dir.clone(),
     });
 
-    // A single `MailboxLocks` map is shared across every writer (inbound
-    // ingest, MARK-*, MAILBOX-*) so they all serialize on the same
-    // per-mailbox `tokio::sync::Mutex<()>`. See `crate::mailbox_locks`
-    // for the lock hierarchy.
-    let mailbox_locks = Arc::new(crate::mailbox_locks::MailboxLocks::new());
+    // `mailbox_locks` was constructed earlier (pre-migration) so the
+    // upgrade migration could document the lock hierarchy against the
+    // same shared pool every other writer (inbound ingest, MARK-*,
+    // MAILBOX-*) eventually contends on. See `crate::mailbox_locks` for
+    // the lock hierarchy.
 
     // Shared state context for MARK-READ / MARK-UNREAD verbs and the
     // per-mailbox write lock used by MAILBOX-CREATE / MAILBOX-DELETE
@@ -890,6 +1113,43 @@ async fn handle_uds_connection_with_timeout(
             ),
             Ok(Ok(Request::HookList)) => (
                 Reply::Json(crate::hook_list_handler::handle_hook_list(&state_ctx, &caller).await),
+                false,
+            ),
+            Ok(Ok(Request::DomainList)) => (
+                Reply::Json(
+                    crate::domain_list_handler::handle_domain_list(
+                        &state_ctx,
+                        &send_ctx.dkim_keys,
+                        &caller,
+                    )
+                    .await,
+                ),
+                false,
+            ),
+            Ok(Ok(Request::DomainAdd(req))) => (
+                Reply::Ack(
+                    crate::domain_handler::handle_domain_add(
+                        &state_ctx,
+                        &mb_ctx,
+                        &send_ctx.dkim_keys,
+                        &req,
+                        &caller,
+                    )
+                    .await,
+                ),
+                false,
+            ),
+            Ok(Ok(Request::DomainRemove(req))) => (
+                Reply::Json(
+                    crate::domain_handler::handle_domain_remove(
+                        &state_ctx,
+                        &mb_ctx,
+                        &send_ctx.dkim_keys,
+                        &req,
+                        &caller,
+                    )
+                    .await,
+                ),
                 false,
             ),
             Ok(Ok(Request::Version)) => (
@@ -1565,12 +1825,13 @@ mod tests {
                 },
             );
             let config = crate::config::Config {
-                domain: "test.local".to_string(),
+                domains: vec!["test.local".to_string()],
                 data_dir: tmp.path().to_path_buf(),
-                dkim_selector: "aimx".to_string(),
+                dkim_selector: Some("aimx".to_string()),
                 trust: "none".to_string(),
                 trusted_senders: vec![],
                 mailboxes,
+                per_domain: std::collections::HashMap::new(),
                 verify_host: None,
                 enable_ipv6: false,
                 signature: None,
@@ -1876,12 +2137,13 @@ mod tests {
             },
         );
         crate::config::Config {
-            domain: "example.com".to_string(),
+            domains: vec!["example.com".to_string()],
             data_dir: data_dir.to_path_buf(),
-            dkim_selector: "aimx".to_string(),
+            dkim_selector: None,
             trust: "none".to_string(),
             trusted_senders: vec![],
             mailboxes,
+            per_domain: HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
             signature: None,
@@ -1897,10 +2159,21 @@ mod tests {
         let dkim_tmp = tempfile::TempDir::new().unwrap();
         crate::dkim::generate_keypair(dkim_tmp.path(), false).unwrap();
         let key = crate::dkim::load_private_key(dkim_tmp.path()).unwrap();
+        let domain = handle.load().default_domain().to_string();
+        let mut map: std::collections::HashMap<String, crate::dkim_keys::DkimKeyEntry> =
+            std::collections::HashMap::new();
+        map.insert(
+            domain,
+            crate::dkim_keys::DkimKeyEntry {
+                key: Arc::new(key),
+                selector: "aimx".to_string(),
+            },
+        );
+        let dkim_keys: crate::dkim_keys::SharedDkimKeyMap =
+            Arc::new(arc_swap::ArcSwap::from_pointee(map));
         let transport: Arc<dyn MailTransport + Send + Sync> = Arc::new(NoopTransport);
         Arc::new(crate::send_handler::SendContext {
-            dkim_key: Arc::new(key),
-            dkim_selector: "aimx".to_string(),
+            dkim_keys,
             config_handle: handle,
             transport,
             data_dir: data_dir.to_path_buf(),
@@ -2037,12 +2310,13 @@ mod tests {
                 },
             );
             let config = crate::config::Config {
-                domain: "example.com".to_string(),
+                domains: vec!["example.com".to_string()],
                 data_dir: tmp.path().to_path_buf(),
-                dkim_selector: "aimx".to_string(),
+                dkim_selector: Some("aimx".to_string()),
                 trust: "none".to_string(),
                 trusted_senders: vec![],
                 mailboxes,
+                per_domain: std::collections::HashMap::new(),
                 verify_host: None,
                 enable_ipv6: false,
                 signature: None,
@@ -2050,9 +2324,19 @@ mod tests {
             };
             let handle_cfg = ConfigHandle::new(config);
 
+            let mut map: std::collections::HashMap<String, crate::dkim_keys::DkimKeyEntry> =
+                std::collections::HashMap::new();
+            map.insert(
+                "example.com".to_string(),
+                crate::dkim_keys::DkimKeyEntry {
+                    key: Arc::new(key),
+                    selector: "aimx".to_string(),
+                },
+            );
+            let dkim_keys: crate::dkim_keys::SharedDkimKeyMap =
+                Arc::new(arc_swap::ArcSwap::from_pointee(map));
             let send_ctx = Arc::new(crate::send_handler::SendContext {
-                dkim_key: Arc::new(key),
-                dkim_selector: "aimx".to_string(),
+                dkim_keys,
                 config_handle: handle_cfg.clone(),
                 transport,
                 data_dir: tmp.path().to_path_buf(),
@@ -2306,7 +2590,7 @@ mod tests {
         let cfg = build_test_config(tmp.path());
         cfg.save(&path).unwrap();
         let handle = ConfigHandle::new(Config::load_ignore_warnings(&path).unwrap());
-        let before_domain = handle.load().domain.clone();
+        let before_domains = handle.load().domains.clone();
 
         // Corrupt the file — not valid TOML.
         std::fs::write(&path, b"this is ][ not toml").unwrap();
@@ -2317,7 +2601,7 @@ mod tests {
             msg.to_lowercase().contains("toml") || msg.to_lowercase().contains("expected"),
             "error should mention TOML parse issue: {msg}"
         );
-        assert_eq!(handle.load().domain, before_domain);
+        assert_eq!(handle.load().domains, before_domains);
         assert_eq!(handle.load().mailboxes.len(), 2);
     }
 

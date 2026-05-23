@@ -1,0 +1,13 @@
+domain = "mydomain.com"
+
+[mailboxes.info]
+address = "info@mydomain.com"
+owner = "ops"
+
+[mailboxes.support]
+address = "support@mydomain.com"
+owner = "ops"
+
+[mailboxes.alice]
+address = "alice@mydomain.com"
+owner = "ops"

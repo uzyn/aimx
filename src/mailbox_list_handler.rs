@@ -48,7 +48,7 @@ use crate::uds_authz::Caller;
 /// from `MailboxConfig::address`, which the MCP `mailbox_create`
 /// tool reads back to surface `<name>@<domain>` to the agent without
 /// requiring a separate config-read path.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MailboxListRow {
     pub name: String,
     pub address: Option<String>,
@@ -241,12 +241,13 @@ mod tests {
             },
         );
         Config {
-            domain: "example.com".to_string(),
+            domains: vec!["example.com".to_string()],
             data_dir: data_dir.to_path_buf(),
-            dkim_selector: "aimx".to_string(),
+            dkim_selector: Some("aimx".to_string()),
             trust: "none".to_string(),
             trusted_senders: vec![],
             mailboxes,
+            per_domain: std::collections::HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
             signature: None,
@@ -328,6 +329,169 @@ mod tests {
             other => panic!("expected Ok, got {other:?}"),
         };
         assert_eq!(body, b"[]");
+    }
+
+    /// Build a two-domain config with FQDN-keyed mailbox entries.
+    /// `alice@a.com` and `bob@b.com` are both owned by uid 4242 ("alice")
+    /// in the fake resolver, so the test caller can see both rows.
+    fn two_domain_config(data_dir: &Path) -> Config {
+        let mut mailboxes = HashMap::new();
+        mailboxes.insert(
+            "*@a.com".to_string(),
+            MailboxConfig {
+                address: "*@a.com".to_string(),
+                owner: "aimx-catchall".to_string(),
+                hooks: vec![],
+                trust: None,
+                trusted_senders: None,
+                allow_root_catchall: false,
+            },
+        );
+        mailboxes.insert(
+            "*@b.com".to_string(),
+            MailboxConfig {
+                address: "*@b.com".to_string(),
+                owner: "aimx-catchall".to_string(),
+                hooks: vec![],
+                trust: None,
+                trusted_senders: None,
+                allow_root_catchall: false,
+            },
+        );
+        mailboxes.insert(
+            "alice@a.com".to_string(),
+            MailboxConfig {
+                address: "alice@a.com".to_string(),
+                owner: "alice".to_string(),
+                hooks: vec![],
+                trust: None,
+                trusted_senders: None,
+                allow_root_catchall: false,
+            },
+        );
+        mailboxes.insert(
+            "alice@b.com".to_string(),
+            MailboxConfig {
+                address: "alice@b.com".to_string(),
+                owner: "alice".to_string(),
+                hooks: vec![],
+                trust: None,
+                trusted_senders: None,
+                allow_root_catchall: false,
+            },
+        );
+        Config {
+            domains: vec!["a.com".to_string(), "b.com".to_string()],
+            data_dir: data_dir.to_path_buf(),
+            dkim_selector: Some("aimx".to_string()),
+            trust: "none".to_string(),
+            trusted_senders: vec![],
+            mailboxes,
+            per_domain: std::collections::HashMap::new(),
+            verify_host: None,
+            enable_ipv6: false,
+            signature: None,
+            upgrade: None,
+        }
+    }
+
+    fn seed_v2_dirs(tmp: &Path) {
+        // `.layout-version` is the marker `storage_path_for` consults to
+        // pick the v2 (per-domain) layout. Without it the storage helpers
+        // fall back to v1 paths and the multi-domain test fixtures would
+        // collide on the local-part.
+        std::fs::write(tmp.join(".layout-version"), "2\n").unwrap();
+        for sub in [
+            "a.com/inbox/catchall",
+            "a.com/sent/catchall",
+            "a.com/inbox/alice",
+            "a.com/sent/alice",
+            "b.com/inbox/catchall",
+            "b.com/sent/catchall",
+            "b.com/inbox/alice",
+            "b.com/sent/alice",
+        ] {
+            std::fs::create_dir_all(tmp.join(sub)).unwrap();
+        }
+    }
+
+    /// Regression: `MAILBOX-LIST` must surface FQDN-shaped mailbox names
+    /// on a multi-domain install, never bare local-parts. The MCP layer
+    /// relies on this so agents can disambiguate `alice@a.com` from
+    /// `alice@b.com` in tool responses.
+    #[tokio::test]
+    async fn multi_domain_response_carries_fqdn_names() {
+        let tmp = TempDir::new().unwrap();
+        seed_v2_dirs(tmp.path());
+        let _r = install_tester_resolver();
+        let config = two_domain_config(tmp.path());
+        let handle = ConfigHandle::new(config);
+        let state_ctx = StateContext::new(tmp.path().to_path_buf(), handle);
+
+        let caller = Caller::new(4242, 4242, None);
+        let resp = handle_mailbox_list(&state_ctx, &caller).await;
+        let body = match resp {
+            JsonAckResponse::Ok { body } => body,
+            other => panic!("expected Ok, got {other:?}"),
+        };
+        let rows: Vec<MailboxListRow> = serde_json::from_slice(&body).unwrap();
+        let names: Vec<String> = rows.iter().map(|r| r.name.clone()).collect();
+
+        // Both FQDN-keyed mailboxes appear with the `@<domain>` suffix.
+        assert!(
+            names.contains(&"alice@a.com".to_string()),
+            "expected alice@a.com in rows; got {names:?}"
+        );
+        assert!(
+            names.contains(&"alice@b.com".to_string()),
+            "expected alice@b.com in rows; got {names:?}"
+        );
+
+        // No row collapses to the bare local-part — strict FQDN regression.
+        for row in &rows {
+            assert!(
+                row.name.contains('@'),
+                "MAILBOX-LIST row must carry FQDN, not bare local-part: {}",
+                row.name
+            );
+            // `address` is populated for every registered row and matches
+            // the FQDN.
+            assert_eq!(
+                row.address.as_deref(),
+                Some(row.name.as_str()),
+                "address field must mirror the FQDN name"
+            );
+        }
+    }
+
+    /// Single-domain installs continue to surface mailbox names as the
+    /// raw config key (which, depending on whether the operator migrated
+    /// the legacy local-part key, is either `alice` or `alice@example.com`).
+    /// In both cases the `address` field carries the FQDN — that's what
+    /// the MCP tools project to agents.
+    #[tokio::test]
+    async fn single_domain_response_address_is_fqdn() {
+        let tmp = TempDir::new().unwrap();
+        seed_dirs(tmp.path());
+        let _r = install_tester_resolver();
+        let config = base_config(tmp.path(), "alice");
+        let handle = ConfigHandle::new(config);
+        let state_ctx = StateContext::new(tmp.path().to_path_buf(), handle);
+
+        let caller = Caller::new(4242, 4242, None);
+        let resp = handle_mailbox_list(&state_ctx, &caller).await;
+        let body = match resp {
+            JsonAckResponse::Ok { body } => body,
+            other => panic!("expected Ok, got {other:?}"),
+        };
+        let rows: Vec<MailboxListRow> = serde_json::from_slice(&body).unwrap();
+        let alice = rows
+            .iter()
+            .find(|r| r.name == "alice")
+            .expect("alice row missing");
+        // `address` always carries the FQDN, even on a single-domain
+        // config that still uses the legacy local-part as the map key.
+        assert_eq!(alice.address.as_deref(), Some("alice@example.com"));
     }
 
     /// Inbox total / unread counts populate from on-disk `.md` files

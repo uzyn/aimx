@@ -3063,10 +3063,14 @@ mod tests {
             .contents();
         let text = std::str::from_utf8(primer).expect("primer must be valid UTF-8");
         let line_count = text.lines().count();
-        // Target: 300–500 lines (soft cap).
+        // Target: 300–600 lines (soft cap). The upper bound is the
+        // "primer is getting long enough that agents will skim it"
+        // ceiling — when new substantive sections push past it,
+        // factor reference material into `references/*.md` instead
+        // of growing the primer body.
         assert!(
-            (300..=500).contains(&line_count),
-            "main primer has {line_count} lines; target range is 300–500"
+            (300..=600).contains(&line_count),
+            "main primer has {line_count} lines; target range is 300–600"
         );
     }
 

@@ -36,15 +36,21 @@ List mailboxes you own.
 
 | Field         | Type   | Description                                                                  |
 |---------------|--------|------------------------------------------------------------------------------|
-| `name`        | string | Mailbox name (the local part).                                               |
-| `inbox_path`  | string | Absolute path to the inbox directory (`/var/lib/aimx/inbox/<name>`).         |
-| `sent_path`   | string | Absolute path to the sent directory (`/var/lib/aimx/sent/<name>`).           |
+| `name`        | string | Mailbox name. **FQDN** (`support@a.com`) — disambiguates across domains on multi-domain installs.  |
+| `address`     | string | Full address `<name>@<domain>` (always equal to `name` on registered mailboxes).  |
+| `inbox_path`  | string | Absolute path to the inbox directory (`/var/lib/aimx/<domain>/inbox/<local>`).  |
+| `sent_path`   | string | Absolute path to the sent directory (`/var/lib/aimx/<domain>/sent/<local>`).    |
 | `total`       | number | Total emails in the inbox.                                                   |
 | `unread`      | number | Inbox emails with `read = false`.                                            |
 | `sent_count`  | number | Total emails in the sent folder.                                             |
 | `registered`  | bool   | `true` for mailboxes in `config.toml`; `false` for stray on-disk dirs only.  |
 
 The empty case returns `[]`. Filtered to caller-owned mailboxes for non-root callers; root sees everything. The MCP process resolves the listing through the daemon over `/run/aimx/aimx.sock`, so it works without read access to root-owned `config.toml`.
+
+Agents that need to filter by domain can do so client-side from the
+FQDN `name` field. See [Multi-domain](multi-domain.md) and the agent
+primer's default-domain rule (bare local-parts in MCP arguments
+resolve to `domains[0]`).
 
 ---
 

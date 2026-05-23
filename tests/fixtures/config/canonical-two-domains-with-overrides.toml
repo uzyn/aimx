@@ -1,0 +1,18 @@
+domains = ["a.com", "b.com"]
+trust = "none"
+trusted_senders = ["*@a-partner.com"]
+signature = "Sent via AIMX"
+
+[domain."b.com"]
+signature = "Sent from B Corp"
+dkim_selector = "s2025"
+trust = "verified"
+trusted_senders = ["*@trusted-partner.com"]
+
+[mailboxes."info@a.com"]
+address = "info@a.com"
+owner = "ops"
+
+[mailboxes."support@b.com"]
+address = "support@b.com"
+owner = "ops"

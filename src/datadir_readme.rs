@@ -5,7 +5,7 @@
 use std::path::Path;
 
 pub const TEMPLATE: &str = include_str!("datadir_readme.md.tpl");
-pub const VERSION: u32 = 7;
+pub const VERSION: u32 = 8;
 
 fn version_line() -> String {
     format!("<!-- aimx-readme-version: {VERSION} -->")
@@ -130,5 +130,48 @@ mod tests {
         refresh_if_outdated(tmp.path()).unwrap();
         let content = std::fs::read_to_string(tmp.path().join("README.md")).unwrap();
         assert_eq!(content, TEMPLATE);
+    }
+
+    /// Post-upgrade refresh contract: a README written by a prior
+    /// binary version (`<!-- aimx-readme-version: 7 -->`) is
+    /// overwritten on first start under the new binary. Pins the
+    /// version-gated refresh path that ships the per-domain layout
+    /// description to operators.
+    #[test]
+    fn refresh_overwrites_previous_version_with_current_template() {
+        let tmp = TempDir::new().unwrap();
+        let dest = tmp.path().join("README.md");
+        std::fs::write(
+            &dest,
+            "<!-- aimx-readme-version: 7 -->\nold content from previous version\n",
+        )
+        .unwrap();
+        refresh_if_outdated(tmp.path()).unwrap();
+        let content = std::fs::read_to_string(&dest).unwrap();
+        assert_eq!(content, TEMPLATE);
+        assert!(
+            content.starts_with(&format!("<!-- aimx-readme-version: {VERSION} -->")),
+            "first line must carry the current version marker"
+        );
+    }
+
+    /// Template content describes the multi-domain per-domain layout
+    /// (`<data_dir>/<domain>/{inbox|sent}/<local>/`). Pinning the
+    /// invariant so a future template rewrite that drops the
+    /// per-domain section trips this test.
+    #[test]
+    fn template_describes_per_domain_layout() {
+        assert!(
+            TEMPLATE.contains("Multi-domain layout"),
+            "template must describe multi-domain layout"
+        );
+        assert!(
+            TEMPLATE.contains(".layout-version"),
+            "template must mention the layout-version marker"
+        );
+        assert!(
+            TEMPLATE.contains("a.com") && TEMPLATE.contains("b.com"),
+            "template must include a two-domain example tree"
+        );
     }
 }

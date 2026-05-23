@@ -33,14 +33,23 @@ static DKIM_CACHE: LazyLock<TempDir> = LazyLock::new(|| {
     cache
 });
 
-/// Copy the cached DKIM keypair into `tmp/dkim/`.
+/// Copy the cached DKIM keypair into `tmp/dkim/`. `aimx dkim-keygen`
+/// (no `--domain`) writes the cache under
+/// `<DKIM_CACHE>/dkim/cache.example.com/{private,public}.key` (the
+/// per-domain default-domain layout). We replicate it at the legacy
+/// un-namespaced `tmp/dkim/{private,public}.key` location because the
+/// daemon's loader falls back to the legacy path for the default
+/// domain when no per-domain key exists under `tmp/dkim/<default>/`,
+/// which keeps the existing integration fixtures (legacy-style
+/// `domain = "agent.example.com"` configs) working without forcing
+/// every test to know its default-domain name.
 fn install_cached_dkim_keys(tmp: &Path) {
     let dkim_dir = tmp.join("dkim");
     if dkim_dir.join("private.key").exists() {
         return;
     }
     std::fs::create_dir_all(&dkim_dir).unwrap();
-    let cache_dkim = DKIM_CACHE.path().join("dkim");
+    let cache_dkim = DKIM_CACHE.path().join("dkim").join("cache.example.com");
     for name in ["private.key", "public.key"] {
         let src = cache_dkim.join(name);
         let dst = dkim_dir.join(name);
@@ -62,6 +71,13 @@ fn setup_test_env(tmp: &Path) -> String {
     // do not fire for fixture reasons. Tests that specifically need a
     // catchall owned by `aimx-catchall` must override the config
     // themselves.
+    //
+    // Multi-domain note: the fixture writes a legacy single-domain
+    // config (`domain = "..."` + local-part keys) — same as a real v1
+    // install — and relies on the daemon's upgrade migration to re-key
+    // on first start. After the migration the in-memory mailbox keys
+    // are FQDN-shaped (e.g. `"alice@agent.example.com"`), which is the
+    // value tests now find in the `mailbox` frontmatter field.
     let owner = current_username();
     let config_content = format!(
         "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@agent.example.com\"\nowner = \"{owner}\"\n\n[mailboxes.alice]\naddress = \"alice@agent.example.com\"\nowner = \"{owner}\"\n",
@@ -85,6 +101,18 @@ fn setup_test_env(tmp: &Path) -> String {
     std::fs::write(&config_path, &config_content).unwrap();
     install_cached_dkim_keys(tmp);
     config_path.to_string_lossy().to_string()
+}
+
+/// Mailbox-key shape exposed by the daemon after the upgrade migration
+/// runs. Helper used by multi-domain-aware assertions that look up the
+/// in-memory mailbox name produced by ingest / send / state handlers.
+#[allow(dead_code)]
+fn mailbox_key(local: &str) -> String {
+    if local == "catchall" {
+        "*@agent.example.com".to_string()
+    } else {
+        format!("{local}@agent.example.com")
+    }
 }
 
 /// Build an `aimx` Command pre-wired with `AIMX_CONFIG_DIR` pointed at the
@@ -142,8 +170,39 @@ fn find_md_files(dir: &Path) -> Vec<std::path::PathBuf> {
 }
 
 /// Resolve the inbox directory for a mailbox under a test tempdir.
+///
+/// Layout-aware: see [`storage_subdir`].
 fn inbox(tmp: &Path, name: &str) -> std::path::PathBuf {
-    tmp.join("inbox").join(name)
+    storage_subdir(tmp, "inbox", name)
+}
+
+/// Resolve the sent directory for a mailbox under a test tempdir.
+///
+/// Layout-aware: see [`storage_subdir`].
+#[allow(dead_code)]
+fn sent(tmp: &Path, name: &str) -> std::path::PathBuf {
+    storage_subdir(tmp, "sent", name)
+}
+
+/// Layout-aware resolver shared by [`inbox`] and [`sent`]. If the
+/// upgrade migration has run and the `<tmp>/.layout-version` marker is
+/// present, returns `<tmp>/<domain>/<folder>/<name>/`. Otherwise falls
+/// back to the legacy `<tmp>/<folder>/<name>/`. Tests that pass
+/// through `setup_test_env` always use a single configured domain, so
+/// finding the per-domain subdir is unambiguous.
+fn storage_subdir(tmp: &Path, folder: &str, name: &str) -> std::path::PathBuf {
+    let marker = tmp.join(".layout-version");
+    if marker.is_file()
+        && let Ok(entries) = std::fs::read_dir(tmp)
+    {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() && p.join(folder).is_dir() {
+                return p.join(folder).join(name);
+            }
+        }
+    }
+    tmp.join(folder).join(name)
 }
 
 /// Search every bundle directory under `mailbox_dir` for an attachment
@@ -413,13 +472,20 @@ fn dkim_keygen_end_to_end() {
         .stdout(predicate::str::contains("DKIM keypair generated"))
         .stdout(predicate::str::contains("_domainkey"));
 
-    assert!(tmp.path().join("dkim/private.key").exists());
-    assert!(tmp.path().join("dkim/public.key").exists());
+    // `aimx dkim-keygen` (no `--domain`) writes the default domain's
+    // keypair under `<dkim_dir>/<default_domain>/` — the per-domain
+    // layout the v2 daemon's loader reads from. Writing to the legacy
+    // un-namespaced root would be a silent-rotation footgun on v2
+    // installs.
+    let private_path = tmp.path().join("dkim/agent.example.com/private.key");
+    let public_path = tmp.path().join("dkim/agent.example.com/public.key");
+    assert!(private_path.exists(), "expected {}", private_path.display());
+    assert!(public_path.exists(), "expected {}", public_path.display());
 
-    let private_pem = std::fs::read_to_string(tmp.path().join("dkim/private.key")).unwrap();
+    let private_pem = std::fs::read_to_string(&private_path).unwrap();
     assert!(private_pem.contains("BEGIN RSA PRIVATE KEY"));
 
-    let public_pem = std::fs::read_to_string(tmp.path().join("dkim/public.key")).unwrap();
+    let public_pem = std::fs::read_to_string(&public_path).unwrap();
     assert!(public_pem.contains("BEGIN PUBLIC KEY"));
 }
 
@@ -465,7 +531,10 @@ fn dkim_keygen_force_overwrite() {
         .assert()
         .success();
 
-    let original = std::fs::read_to_string(tmp.path().join("dkim/private.key")).unwrap();
+    // The no-`--domain` keygen lands under the per-domain default-domain
+    // path on v2 installs.
+    let private_path = tmp.path().join("dkim/agent.example.com/private.key");
+    let original = std::fs::read_to_string(&private_path).unwrap();
 
     aimx_cmd(tmp.path())
         .arg("--data-dir")
@@ -475,7 +544,7 @@ fn dkim_keygen_force_overwrite() {
         .assert()
         .success();
 
-    let new = std::fs::read_to_string(tmp.path().join("dkim/private.key")).unwrap();
+    let new = std::fs::read_to_string(&private_path).unwrap();
     assert_ne!(original, new);
 }
 
@@ -914,16 +983,25 @@ fn mcp_mailbox_list_returns_caller_owned() {
         .iter()
         .filter_map(|row| row.get("name").and_then(|v| v.as_str()))
         .collect();
-    assert!(names.contains(&"alice"), "expected alice in {names:?}");
+    // Multi-domain: mailbox names are FQDN-shaped post-rekey. The bare
+    // local-part shape (`"alice"`, `"catchall"`) is gone from the
+    // listing — agents disambiguate via `<local>@<domain>`.
     assert!(
-        names.contains(&"catchall"),
-        "expected catchall in {names:?}"
+        names.contains(&"alice@agent.example.com"),
+        "expected alice@agent.example.com in {names:?}"
+    );
+    assert!(
+        names.contains(&"*@agent.example.com"),
+        "expected *@agent.example.com (catchall) in {names:?}"
     );
 
     let alice = arr
         .iter()
-        .find(|row| row.get("name").and_then(|v| v.as_str()) == Some("alice"))
+        .find(|row| row.get("name").and_then(|v| v.as_str()) == Some("alice@agent.example.com"))
         .unwrap();
+    // Storage path still ends in `/inbox/alice` (the local-part is the
+    // on-disk directory name) but the parent is now the per-domain
+    // root `<data_dir>/<domain>/`.
     assert!(
         alice
             .get("inbox_path")
@@ -2285,8 +2363,11 @@ fn serve_e2e_cc_recipients() {
 
     assert_eq!(get_toml_str(alice_table, "subject"), "CC Test");
     assert_eq!(get_toml_str(bob_table, "subject"), "CC Test");
-    assert_eq!(get_toml_str(alice_table, "mailbox"), "alice");
-    assert_eq!(get_toml_str(bob_table, "mailbox"), "bob");
+    assert_eq!(
+        get_toml_str(alice_table, "mailbox"),
+        "alice@agent.example.com"
+    );
+    assert_eq!(get_toml_str(bob_table, "mailbox"), "bob@agent.example.com");
 
     let alice_content = std::fs::read_to_string(&alice_files[0]).unwrap();
     let bob_content = std::fs::read_to_string(&bob_files[0]).unwrap();
@@ -2334,8 +2415,11 @@ fn serve_e2e_bcc_recipients() {
 
     assert_eq!(get_toml_str(alice_table, "subject"), "BCC Test");
     assert_eq!(get_toml_str(bob_table, "subject"), "BCC Test");
-    assert_eq!(get_toml_str(alice_table, "mailbox"), "alice");
-    assert_eq!(get_toml_str(bob_table, "mailbox"), "bob");
+    assert_eq!(
+        get_toml_str(alice_table, "mailbox"),
+        "alice@agent.example.com"
+    );
+    assert_eq!(get_toml_str(bob_table, "mailbox"), "bob@agent.example.com");
 
     // BCC address should not appear as a Bcc: header in the stored email
     let bob_content = std::fs::read_to_string(&bob_files[0]).unwrap();
@@ -2404,9 +2488,9 @@ fn serve_e2e_to_cc_bcc_combined() {
     );
 
     for (files, expected_mailbox) in [
-        (&alice_files, "alice"),
-        (&bob_files, "bob"),
-        (&catchall_files, "catchall"),
+        (&alice_files, "alice@agent.example.com"),
+        (&bob_files, "bob@agent.example.com"),
+        (&catchall_files, "*@agent.example.com"),
     ] {
         let fm = read_frontmatter(&files[0]);
         let table = fm.as_table().unwrap();
@@ -2906,7 +2990,7 @@ fn send_uds_end_to_end_emits_multipart_alternative_for_markdown_body() {
     // The sent record exists at sent/alice/<stem>.md and its body
     // contains the Markdown source verbatim (no `.html` sibling, no
     // rendered HTML in the persisted body).
-    let sent_dir = tmp.path().join("sent").join("alice");
+    let sent_dir = sent(tmp.path(), "alice");
     let entries: Vec<_> = std::fs::read_dir(&sent_dir)
         .unwrap()
         .filter_map(|e| e.ok())
@@ -3105,7 +3189,7 @@ fn send_uds_end_to_end_text_only_emits_single_part_text_plain() {
     // trail declares `outbound_format = "text"` so an operator
     // browsing `sent/` can tell at a glance the recipient saw plain
     // text — distinct from a default Markdown send (`"markdown"`).
-    let sent_dir = tmp.path().join("sent").join("alice");
+    let sent_dir = sent(tmp.path(), "alice");
     let entries: Vec<_> = std::fs::read_dir(&sent_dir)
         .unwrap()
         .filter_map(|e| e.ok())
@@ -3228,7 +3312,7 @@ fn send_uds_end_to_end_html_body_uses_supplied_html_verbatim() {
     // Sent record stores the --body text, not the --html-body content.
     // The "custom HTML is not stored" invariant is verified at the
     // integration layer here.
-    let sent_dir = tmp.path().join("sent").join("alice");
+    let sent_dir = sent(tmp.path(), "alice");
     let entries: Vec<_> = std::fs::read_dir(&sent_dir)
         .unwrap()
         .filter_map(|e| e.ok())
@@ -3633,8 +3717,11 @@ fn serve_e2e_stale_readme_refreshed_at_startup() {
     // *after* refresh_if_outdated runs in serve startup.  The README should
     // now contain the current template, not the stale content.
     let after = std::fs::read_to_string(&readme_path).unwrap();
+    // NOTE: keep this literal in lockstep with `VERSION` in
+    // `src/datadir_readme.rs`. The crate is binary-only (no `lib.rs`), so the
+    // constant isn't reachable from the integration target — bump both.
     assert!(
-        after.starts_with("<!-- aimx-readme-version: 7 -->"),
+        after.starts_with("<!-- aimx-readme-version: 8 -->"),
         "README should start with current version comment after serve startup; got: {}",
         after.lines().next().unwrap_or("<empty>")
     );
@@ -3705,10 +3792,14 @@ fn mcp_mark_read_concurrent_with_inbound_ingest() {
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
-    // Pre-seed one email so MARK-READ has a target.
-    let alice_dir = inbox(tmp.path(), "alice");
+    // Pre-seed one email so MARK-READ has a target. `inbox()` is
+    // layout-aware: pre-daemon it returns the legacy path, post-daemon
+    // (after the upgrade migration runs) it returns the per-domain
+    // path. Re-resolve after `start_serve` so the read uses whichever
+    // location the migration produced.
+    let pre_alice_dir = inbox(tmp.path(), "alice");
     create_email_file(
-        &alice_dir,
+        &pre_alice_dir,
         "2025-06-01-001",
         "sender@example.com",
         "Hello",
@@ -3717,6 +3808,7 @@ fn mcp_mark_read_concurrent_with_inbound_ingest() {
 
     let port = find_free_port();
     let daemon = start_serve(tmp.path(), port);
+    let alice_dir = inbox(tmp.path(), "alice");
 
     let runtime = tmp.path().join("run");
     let sock = runtime.join("aimx.sock");
@@ -3949,11 +4041,12 @@ fn mailbox_create_via_uds_hotswaps_config_and_routes_new_mail() {
          catchall contents = {catchall_md:?}"
     );
 
-    // config.toml on disk reflects the new mailbox stanza.
+    // config.toml on disk reflects the new mailbox stanza (FQDN-keyed
+    // so the on-disk shape matches the multi-domain in-memory shape).
     let config_text = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
     assert!(
-        config_text.contains("[mailboxes.eve]"),
-        "config.toml should contain the new stanza: {config_text}"
+        config_text.contains("[mailboxes.\"eve@agent.example.com\"]"),
+        "config.toml should contain the new FQDN-keyed stanza: {config_text}"
     );
 
     stop_serve(daemon);
@@ -4057,9 +4150,9 @@ fn mailbox_delete_via_uds_refuses_nonempty_and_succeeds_after_cleanup() {
         "delete must be refused with NONEMPTY error, got stderr: {stderr}"
     );
 
-    // The stanza must still be there.
+    // The stanza must still be there (FQDN-keyed post-create).
     let config_text = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
-    assert!(config_text.contains("[mailboxes.qux]"));
+    assert!(config_text.contains("[mailboxes.\"qux@agent.example.com\"]"));
 
     // Remove the file and retry; delete now succeeds, stanza is gone,
     // subsequent mail addressed to qux@domain falls through to catchall.
@@ -4078,7 +4171,7 @@ fn mailbox_delete_via_uds_refuses_nonempty_and_succeeds_after_cleanup() {
 
     let config_text = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
     assert!(
-        !config_text.contains("[mailboxes.qux]"),
+        !config_text.contains("qux"),
         "stanza should be removed after successful delete: {config_text}"
     );
 
@@ -4161,7 +4254,7 @@ fn mailbox_delete_force_yes_wipes_contents_and_succeeds() {
     // Stanza is gone.
     let config_text = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
     assert!(
-        !config_text.contains("[mailboxes.zed]"),
+        !config_text.contains("zed"),
         "stanza should be removed after force-delete: {config_text}"
     );
     // Inbox dir is empty (the daemon leaves the empty dir on disk per S46).
@@ -4237,9 +4330,9 @@ fn mailbox_delete_force_without_yes_prompts_and_aborts_on_n() {
         yon_inbox.join("2025-04-01-130000-keep.md").is_file(),
         "abort must leave the email on disk"
     );
-    // Stanza still present.
+    // Stanza still present (FQDN-keyed post-create).
     let config_text = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
-    assert!(config_text.contains("[mailboxes.yon]"));
+    assert!(config_text.contains("[mailboxes.\"yon@agent.example.com\"]"));
 
     stop_serve(daemon);
 }
@@ -4333,11 +4426,13 @@ fn mailbox_create_delete_force_e2e_as_non_root_user() {
         "UDS path must NOT print the restart-hint banner: {stdout}"
     );
 
-    // config.toml on disk reflects the new mailbox stanza.
+    // config.toml on disk reflects the new mailbox stanza, keyed by
+    // the canonical FQDN so the on-disk shape matches the multi-domain
+    // in-memory shape.
     let config_text = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
     assert!(
-        config_text.contains("[mailboxes.task-mb]"),
-        "config.toml should contain the new stanza: {config_text}"
+        config_text.contains("[mailboxes.\"task-mb@agent.example.com\"]"),
+        "config.toml should contain the new FQDN-keyed stanza: {config_text}"
     );
     // The owner field must be the runner's username (synthesized by
     // the daemon from SO_PEERCRED — never client-supplied).
@@ -4348,7 +4443,7 @@ fn mailbox_create_delete_force_e2e_as_non_root_user() {
 
     // On-disk owner check: the inbox dir must be owned by the runner's
     // uid (the daemon chowns to the resolved owner).
-    let inbox_dir = tmp.path().join("inbox").join("task-mb");
+    let inbox_dir = inbox(tmp.path(), "task-mb");
     assert!(inbox_dir.is_dir(), "inbox/task-mb/ must exist on disk");
     use std::os::unix::fs::MetadataExt;
     let meta = std::fs::metadata(&inbox_dir).unwrap();
@@ -4383,8 +4478,8 @@ fn mailbox_create_delete_force_e2e_as_non_root_user() {
     // config.toml must no longer reference task-mb.
     let config_text_after = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
     assert!(
-        !config_text_after.contains("[mailboxes.task-mb]"),
-        "config.toml must no longer contain task-mb stanza: {config_text_after}"
+        !config_text_after.contains("task-mb"),
+        "config.toml must no longer reference task-mb: {config_text_after}"
     );
 
     stop_serve(daemon);
@@ -5037,12 +5132,15 @@ fn mcp_mailbox_create_against_running_daemon_succeeds_for_non_root() {
 
     // Daemon hot-swapped the config. The on-disk stanza names the
     // runner as the owner because the daemon synthesizes from
-    // SO_PEERCRED, not from any client-supplied value.
+    // SO_PEERCRED, not from any client-supplied value. The stanza is
+    // keyed by the canonical FQDN so the on-disk shape matches the
+    // multi-domain in-memory shape (no carry-over re-key needed on
+    // the next restart).
     let config_text = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
     let runner = current_username();
     assert!(
-        config_text.contains("[mailboxes.agent-mb]"),
-        "config.toml should carry the new stanza: {config_text}"
+        config_text.contains("[mailboxes.\"agent-mb@agent.example.com\"]"),
+        "config.toml should carry the new stanza FQDN-keyed: {config_text}"
     );
     assert!(
         config_text.contains(&format!("owner = \"{runner}\"")),
@@ -5232,15 +5330,22 @@ fn concurrent_ingest_burst_and_mark_same_mailbox_no_torn_writes() {
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
-    let alice_dir = inbox(tmp.path(), "alice");
     // Pre-seed two emails so MARK-READ has stable targets while new
-    // inbound ingests are landing in the same directory.
+    // inbound ingests are landing in the same directory. `inbox()` is
+    // layout-aware: pre-daemon it returns the legacy path, post-daemon
+    // (after the upgrade migration runs) it returns the per-domain
+    // path. Re-resolve after `start_serve` so the read uses whichever
+    // location the migration produced.
+    let pre_alice_dir = inbox(tmp.path(), "alice");
     for id in ["2025-06-01-seed1", "2025-06-01-seed2"] {
-        create_email_file(&alice_dir, id, "sender@example.com", "Pre-seed", false);
+        create_email_file(&pre_alice_dir, id, "sender@example.com", "Pre-seed", false);
     }
 
     let port = find_free_port();
     let daemon = start_serve(tmp.path(), port);
+    // Re-resolve after the migration may have moved storage under
+    // `<data_dir>/<default_domain>/inbox/<name>/`.
+    let alice_dir = inbox(tmp.path(), "alice");
 
     let runtime = tmp.path().join("run");
     let sock = runtime.join("aimx.sock");
@@ -5463,11 +5568,11 @@ fn concurrent_mailbox_create_and_ingest_does_not_deadlock() {
     watchdog_cancel.store(true, std::sync::atomic::Ordering::Release);
     watchdog.join().unwrap();
 
-    // config.toml reflects the create.
+    // config.toml reflects the create (FQDN-keyed).
     let config_text = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
     assert!(
-        config_text.contains("[mailboxes.newton]"),
-        "mailbox create must land on disk: {config_text}"
+        config_text.contains("[mailboxes.\"newton@agent.example.com\"]"),
+        "mailbox create must land on disk FQDN-keyed: {config_text}"
     );
 
     // The message went to either newton (if create won) or catchall
@@ -6086,11 +6191,13 @@ fn hooks_create_anonymous_prints_derived_name_via_daemon() {
     );
 
     // The daemon-rewritten config must not have a `name =` entry.
+    // Multi-domain: post-rekey the mailbox is keyed by FQDN
+    // (`alice@agent.example.com`), so look up under the canonical key.
     let content = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
     let parsed: toml::Value = toml::from_str(&content).unwrap();
     let hooks = parsed
         .get("mailboxes")
-        .and_then(|m| m.get("alice"))
+        .and_then(|m| m.get("alice@agent.example.com"))
         .and_then(|a| a.get("hooks"))
         .and_then(|h| h.as_array())
         .unwrap();
@@ -7110,7 +7217,7 @@ fn email_list_full_cycle_against_root_owned_config() {
     // `sent/alice/`. Without this assertion a future regression where
     // the sent-copy persistence silently no-ops would only be caught
     // by the EACCES guard, which would not fire.
-    let sent_dir = tmp.path().join("sent").join("alice");
+    let sent_dir = sent(tmp.path(), "alice");
     let sent_md_count = std::fs::read_dir(&sent_dir)
         .expect("sent/alice/ must exist")
         .filter_map(|e| e.ok())

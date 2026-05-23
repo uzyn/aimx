@@ -6,7 +6,7 @@ A mailbox maps an email address to a directory on disk. Command starts with `aim
 
 - **Mailboxes are directories.** Creating a mailbox creates two folders (one under `inbox/`, one under `sent/`) and registers an address. No passwords, no database.
 - **Per-mailbox owner.** Every mailbox has a single Linux `owner` in `config.toml`. Storage is chowned `<owner>:<owner> 0700` at create and kept consistent through every write. Only the owner and root can read it; the MCP server and UDS both authorize on `SO_PEERCRED` matching the owner uid. See [Security: Per-action authorization](security.md#per-action-authorization).
-- **Catchall.** The `catchall` mailbox catches mail for unrecognized addresses at your domain. It is inbound-only (no `sent/catchall/`), owned by the reserved `aimx-catchall` system user.
+- **Catchall.** The `catchall` mailbox catches mail for unrecognized addresses at a configured domain. It is inbound-only (no `sent/catchall/`), owned by the reserved `aimx-catchall` system user. On multi-domain installs, each domain has its own catchall (`*@<domain>`) with independent owner and hook semantics — see [Multi-domain](multi-domain.md).
 - **No sudo for the mailboxes you own.** `aimx mailboxes create / delete` route through the daemon's UDS, so the daemon synthesizes the owner from `SO_PEERCRED` and atomically rewrites `config.toml`. Root may still pass `--owner <user>` to provision a mailbox for another uid.
 - **Hot-reload.** When `aimx serve` is running, create and delete take effect on the next SMTP session — no restart needed.
 - **Delete is file-safe.** Non-empty mailboxes are refused with `ERR NONEMPTY` and a file count. Archive or remove the files first. The directories are left on disk after delete so an operator can `rmdir` them at leisure.
@@ -16,12 +16,18 @@ A mailbox maps an email address to a directory on disk. Command starts with `aim
 
 ```text
 /var/lib/aimx/
-├── inbox/              # inbound mail lives here
-│   ├── catchall/
-│   └── support/
-└── sent/               # outbound sent copies
-    └── support/
+└── <domain>/           # one directory per configured domain
+    ├── inbox/          # inbound mail lives here
+    │   ├── catchall/
+    │   └── support/
+    └── sent/           # outbound sent copies
+        └── support/
 ```
+
+Each domain configured in `domains` gets its own `<data_dir>/<domain>/`
+subtree with independent `inbox/` and `sent/`. Single-domain installs
+still see one top-level domain directory — the layout is symmetric.
+See [Multi-domain: Storage layout](multi-domain.md#storage-layout).
 
 Each email is stored as either a flat `YYYY-MM-DD-HHMMSS-<slug>.md` file
 when it has zero attachments, or as a bundle directory
@@ -30,16 +36,31 @@ as a sibling file when attachments are present.
 
 ### Routing logic
 
-When an email arrives, AIMX matches the local part of the recipient address (the part before `@`) against mailbox names in the config. If a mailbox with that exact name exists, the email is delivered there. Otherwise it falls through to the `catchall` mailbox.
+Mailboxes are keyed by **full FQDN** in `config.toml`
+(`[mailboxes."support@a.com"]`) — the address-before-the-`@` plus the
+domain. When an email arrives, AIMX looks for an exact FQDN match. If
+that misses, it falls through to the per-domain catchall
+(`[mailboxes."*@<domain>"]`). If that also misses, the message is
+rejected.
 
-RCPT TO addresses whose domain is not the configured `domain` (case-insensitive exact match) are rejected at SMTP time with `550 5.7.1 relay not permitted` and never reach storage. AIMX is not an open relay: `catchall` only covers unrecognized local parts *at your configured domain*, not unrelated domains or subdomains.
+RCPT TO addresses whose domain is not in the configured `domains` list
+(case-insensitive exact match) are rejected at SMTP time with
+`550 5.7.1 relay not permitted` and never reach storage. AIMX is not an
+open relay: each domain's catchall only covers unrecognized local parts
+at that specific domain, not unrelated domains or subdomains.
 
-For example, with mailboxes `support` and `catchall` configured:
-- `support@agent.yourdomain.com` -> delivered to the `support` mailbox
-- `billing@agent.yourdomain.com` -> delivered to the `catchall` mailbox (no `billing` mailbox exists)
-- `anything@agent.yourdomain.com` -> delivered to the `catchall` mailbox
+For example, with mailboxes `support@a.com` and `catchall@a.com`
+configured on `domains = ["a.com"]`:
+- `support@a.com` -> delivered to the `support@a.com` mailbox
+- `billing@a.com` -> delivered to the `*@a.com` catchall (no `billing` mailbox exists)
+- `anything@a.com` -> delivered to the `*@a.com` catchall
 - `anything@some-other-domain.com` -> rejected at RCPT TO with `550 5.7.1 relay not permitted`
-- `anything@sub.agent.yourdomain.com` -> rejected at RCPT TO with `550 5.7.1 relay not permitted`
+- `anything@sub.a.com` -> rejected at RCPT TO with `550 5.7.1 relay not permitted`
+
+On a multi-domain install (`domains = ["a.com", "b.com"]`), each domain
+has its own routing table. `support@a.com` and `support@b.com` are
+independent mailboxes; either may exist without the other; each has its
+own owner and hooks. See [Multi-domain](multi-domain.md).
 
 ## Managing mailboxes
 
@@ -47,14 +68,25 @@ For example, with mailboxes `support` and `catchall` configured:
 
 ```bash
 # As yourself: create a mailbox owned by your own uid.
+# Bare local part — resolves to <local>@<default domain>.
 aimx mailboxes create support
+
+# Or, with the FQDN explicit (required on multi-domain installs when
+# you want a domain other than the default):
+aimx mailboxes create support@side-project.com
 ```
 
-This creates `support@agent.yourdomain.com` and both directories:
-`/var/lib/aimx/inbox/support/` (for incoming mail) and
-`/var/lib/aimx/sent/support/` (for outbound copies). Storage is chowned to
-your uid at mode `0700`. Deletion removes both; `catchall` cannot be
-deleted.
+This creates `support@<domain>` and both directories under the
+domain's storage subtree:
+`/var/lib/aimx/<domain>/inbox/support/` (for incoming mail) and
+`/var/lib/aimx/<domain>/sent/support/` (for outbound copies). Storage
+is chowned to your uid at mode `0700`. Deletion removes both;
+`catchall` cannot be deleted.
+
+Bare local parts (`support`) resolve to the **default domain**
+(`domains[0]`). To create a mailbox on a non-default domain, pass the
+FQDN form (`support@side-project.com`). See [Multi-domain](multi-domain.md)
+for the full ruleset.
 
 **Owner-binding rule.** Non-root callers create and delete only mailboxes they own — the daemon synthesizes the owner from `SO_PEERCRED` and ignores any client-supplied owner. Root passes unconditionally and may use `--owner <user>` to provision a mailbox owned by another Linux user. Passing `--owner <other>` from a non-root shell prints a soft warning to stderr and submits the request with the synthesized owner anyway.
 
@@ -324,8 +356,14 @@ Agents send email using the `email_send` and `email_reply` MCP tools. See [MCP S
 ### Send pipeline
 
 1. `aimx send` composes an RFC 5322 message and submits it over `/run/aimx/aimx.sock`. The client does not read `config.toml`.
-2. `aimx serve` parses `From:` from the body, verifies the domain matches `config.domain` and the local part resolves to a configured non-wildcard mailbox, DKIM-signs the message with RSA-SHA256, and delivers it directly to the recipient's MX over SMTP. The catchall (`*@domain`) is never accepted as an outbound sender.
+2. `aimx serve` parses `From:` from the body, verifies the domain is in `config.domains` and the local part resolves to a configured non-wildcard mailbox at that domain, DKIM-signs the message with the per-domain key (RSA-SHA256), and delivers it directly to the recipient's MX over SMTP. The catchall (`*@<domain>`) is never accepted as an outbound sender.
 3. `aimx send` exits as soon as the daemon returns a status. Signing, mailbox resolution, and delivery happen entirely in the daemon — the client does not need root, does not read the DKIM key, and does not read `config.toml`.
+
+Bare local parts on `--from` (`--from support`) resolve to
+`<local>@<default domain>` daemon-side. To send from a non-default
+domain on a multi-domain install, pass the full FQDN
+(`--from support@side-project.com`). DKIM signs with the From: domain's
+key, never `domains[0]`'s.
 
 ### Reply threading
 

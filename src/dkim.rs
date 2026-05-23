@@ -54,6 +54,17 @@ pub fn generate_keypair(dkim_root: &Path, force: bool) -> Result<(), Box<dyn std
 
     std::fs::create_dir_all(dkim_root).map_err(|e| wrap_dkim_write_error(dkim_root, e))?;
 
+    // Tighten the parent dir to `0700` so the `0600` private key cannot
+    // be reached by a traversal-bit probe even when the file mode is
+    // correct. Idempotent — every caller is allowed to re-chmod its
+    // own dkim_root. On non-Unix this is a no-op.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dkim_root, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| wrap_dkim_write_error(dkim_root, e))?;
+    }
+
     // Force-overwrite path: remove pre-existing files so `create_new(true)`
     // succeeds with the tightened mode. (Otherwise `OpenOptions` would
     // fail with `AlreadyExists` and leave the old file at its old mode.)
@@ -556,6 +567,31 @@ mod tests {
             mode, 0o600,
             "v0.2: DKIM private key must be root-only (0o600) because \
              signing happens inside the `aimx serve` daemon."
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dkim_root_directory_is_chmod_0700() {
+        // The private key is `0o600`, but the directory traversal bit
+        // matters too — a world-traversable parent dir leaks the
+        // existence and metadata of the key. `generate_keypair` must
+        // tighten its `dkim_root` to `0o700` itself so both the CLI
+        // direct path and the daemon path land at the same on-disk
+        // permissions without each caller having to remember to chmod.
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let per_domain_dir = tmp.path().join("example.com");
+        generate_keypair(&per_domain_dir, false).unwrap();
+        let mode = std::fs::metadata(&per_domain_dir)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o700,
+            "DKIM parent dir must be 0o700 to keep the 0o600 private key \
+             unreachable via the traversal bit"
         );
     }
 

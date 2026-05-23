@@ -19,6 +19,11 @@ pub struct StatusInfo {
     pub config_path: String,
     pub dkim_selector: String,
     pub dkim_key_present: bool,
+    /// Per-domain status rows. On a single-domain install carries one
+    /// row; on multi-domain installs the doctor renders a per-domain
+    /// block per entry. The first row is always the default domain
+    /// (mirrors `config.domains[0]`).
+    pub domains: Vec<DomainStatus>,
     pub smtp_running: bool,
     /// Build tag of the binary running `aimx doctor` itself (the
     /// invoking process). Always populated.
@@ -49,6 +54,42 @@ pub struct StatusInfo {
 pub struct DnsSection {
     pub results: Vec<(String, DnsVerifyResult)>,
     pub records: Vec<DnsRecord>,
+}
+
+/// Per-domain row of the `aimx doctor` Configuration section.
+///
+/// Single-domain installs render one row's fields inline with the
+/// classic flat output (no extra nesting). Multi-domain installs
+/// render one block per row with the domain name as a header, the
+/// `[default]` marker on the first row, and per-domain DKIM /
+/// mailbox / unread stats below.
+#[derive(Debug, Clone)]
+pub struct DomainStatus {
+    /// FQDN of the domain. Lower-case per `Config::load` normalisation.
+    pub domain: String,
+    /// True for `config.domains[0]` — the default sending identity
+    /// that bare local-parts resolve against.
+    pub is_default: bool,
+    /// Resolved DKIM selector for this domain (per-domain override →
+    /// top-level → `"aimx"`).
+    pub dkim_selector: String,
+    /// Whether `<dkim_dir>/<domain>/private.key` (or the legacy
+    /// un-namespaced path for the default domain on pre-migration
+    /// installs) exists.
+    pub dkim_key_present: bool,
+    /// Result of resolving `<selector>._domainkey.<domain>` and (when a
+    /// local public key is on disk) comparing the published value to the
+    /// local key. `None` means the check was skipped (no `NetworkOps`
+    /// result, e.g. tests that don't seed DNS). Multi-domain installs
+    /// surface this on the per-domain block so operators see per-domain
+    /// DKIM DNS health alongside the per-domain key-on-disk status.
+    pub dkim_dns: Option<DnsVerifyResult>,
+    /// Count of mailboxes (registered in `[mailboxes."<local>@<domain>"]`)
+    /// scoped to this domain. The catchall (`*@<domain>`) is included.
+    pub mailbox_count: usize,
+    /// Sum of unread message counts across every mailbox scoped to
+    /// this domain.
+    pub unread_count: usize,
 }
 
 /// Build-version metadata for the invoking `aimx` binary. Currently
@@ -111,7 +152,18 @@ pub fn gather_status_with_ops<S: SystemOps>(
     sys: &S,
     net: &dyn NetworkOps,
 ) -> StatusInfo {
-    let dkim_key_present = crate::config::dkim_dir().join("private.key").exists();
+    // Layout-aware DKIM key probe: post-migration the private key lives
+    // at `<dkim_dir>/<default_domain>/private.key`; pre-migration (v1
+    // legacy installs or fresh `aimx setup` before the layout marker is
+    // written) it lives at the legacy `<dkim_dir>/private.key`. Using
+    // `resolve_active_dkim_dir` keeps the report aligned with the
+    // path the daemon actually signs from, so a post-migration host
+    // does not falsely report MISSING and steer the operator into
+    // `aimx dkim-keygen` on the wrong path.
+    let dkim_root_base = crate::config::dkim_dir();
+    let active_dkim_dir =
+        crate::upgrade_migration::resolve_active_dkim_dir(config, &dkim_root_base);
+    let dkim_key_present = active_dkim_dir.join("private.key").exists();
     let smtp_running = sys.is_service_running("aimx");
     let runtime_dir = crate::serve::runtime_dir();
     let stale_send_sock_present =
@@ -178,12 +230,81 @@ pub fn gather_status_with_ops<S: SystemOps>(
 
     let dns = gather_dns_section(config, net);
 
+    // Per-domain rows. Order follows `config.domains` so the default
+    // (`domains[0]`) is always index 0. Empty `domains` is impossible
+    // on a loaded `Config` (the loader rejects it), so the unwrap
+    // path is unreachable.
+    // Only run per-domain DKIM DNS lookups on multi-domain installs.
+    // Single-domain installs already cover the default-domain DKIM
+    // check inside `gather_dns_section`; running it twice would emit
+    // duplicate lookups for no observable benefit.
+    let do_per_domain_dkim_dns = config.domains.len() > 1;
+
+    let domains: Vec<DomainStatus> = config
+        .domains
+        .iter()
+        .enumerate()
+        .map(|(i, dom)| {
+            // Per-domain DKIM key probe. Mirrors the single-domain
+            // path: a per-domain dir is canonical; the default domain
+            // also falls back to the legacy un-namespaced path so v1
+            // installs that haven't been migrated still register as
+            // `present`.
+            let per_domain_key = dkim_root_base.join(dom).join("private.key");
+            let legacy_default_key = dkim_root_base.join("private.key");
+            let dom_dkim_present =
+                per_domain_key.exists() || (i == 0 && legacy_default_key.exists());
+
+            let (mailbox_count, unread_count) = count_mailboxes_for_domain(&mailboxes, dom);
+
+            let selector = config.dkim_selector_for_domain(dom).to_string();
+            let dkim_dns = if do_per_domain_dkim_dns {
+                // Locate the per-domain public key for the local-vs-DNS
+                // comparison. Falls back to the legacy un-namespaced
+                // path for the default domain on pre-migration installs.
+                let per_domain_pub = dkim_root_base.join(dom).join("public.key");
+                let legacy_default_pub = dkim_root_base.join("public.key");
+                let pubkey_dir = if per_domain_pub.exists() {
+                    Some(dkim_root_base.join(dom))
+                } else if i == 0 && legacy_default_pub.exists() {
+                    Some(dkim_root_base.clone())
+                } else {
+                    None
+                };
+                let local_pub = pubkey_dir.and_then(|dir| {
+                    crate::dkim::dns_record_value(&dir)
+                        .ok()
+                        .and_then(|v| v.strip_prefix("v=DKIM1; k=rsa; p=").map(|s| s.to_string()))
+                });
+                Some(setup::verify_dkim(
+                    net,
+                    dom,
+                    &selector,
+                    local_pub.as_deref(),
+                ))
+            } else {
+                None
+            };
+
+            DomainStatus {
+                domain: dom.clone(),
+                is_default: i == 0,
+                dkim_selector: selector,
+                dkim_key_present: dom_dkim_present,
+                dkim_dns,
+                mailbox_count,
+                unread_count,
+            }
+        })
+        .collect();
+
     StatusInfo {
-        domain: config.domain.clone(),
+        domain: config.default_domain().to_string(),
         data_dir: config.data_dir.to_string_lossy().to_string(),
         config_path: crate::config::config_path().to_string_lossy().to_string(),
-        dkim_selector: config.dkim_selector.clone(),
+        dkim_selector: config.default_dkim_selector().to_string(),
         dkim_key_present,
+        domains,
         smtp_running,
         client_version,
         server_version,
@@ -193,6 +314,27 @@ pub fn gather_status_with_ops<S: SystemOps>(
         mailboxes,
         dns,
     }
+}
+
+/// Sum mailbox count + unread count for mailboxes whose configured
+/// address ends in `@<domain>`. Walks `MailboxStatus` rows (which
+/// carry on-disk unread counts and the FQDN address copied from
+/// `MailboxConfig::address` at gather time). `MailboxConfig::address`
+/// is mandatory at config-load, so the FQDN is always available.
+fn count_mailboxes_for_domain(statuses: &[MailboxStatus], domain: &str) -> (usize, usize) {
+    let mut count = 0;
+    let mut unread = 0;
+    let domain_lc = domain.to_ascii_lowercase();
+    for s in statuses {
+        let Some((_, mb_domain)) = s.address.rsplit_once('@') else {
+            continue;
+        };
+        if mb_domain.eq_ignore_ascii_case(&domain_lc) {
+            count += 1;
+            unread += s.unread;
+        }
+    }
+    (count, unread)
 }
 
 fn gather_dns_section(config: &Config, net: &dyn NetworkOps) -> Option<DnsSection> {
@@ -205,7 +347,11 @@ fn gather_dns_section(config: &Config, net: &dyn NetworkOps) -> Option<DnsSectio
         None
     };
 
-    let dkim_dir = crate::config::dkim_dir();
+    // Mirror the layout-aware probe used at the top of
+    // `gather_status_with_ops`: read the public key from the per-domain
+    // dir post-migration, the legacy root on v1 installs.
+    let dkim_dir_base = crate::config::dkim_dir();
+    let dkim_dir = crate::upgrade_migration::resolve_active_dkim_dir(config, &dkim_dir_base);
     let local_dkim_pubkey = if dkim_dir.join("public.key").exists() {
         crate::dkim::dns_record_value(&dkim_dir)
             .ok()
@@ -214,18 +360,20 @@ fn gather_dns_section(config: &Config, net: &dyn NetworkOps) -> Option<DnsSectio
         None
     };
 
+    let primary_domain = config.default_domain();
+    let selector = config.default_dkim_selector();
     let results = setup::verify_all_dns(
         net,
-        &config.domain,
+        primary_domain,
         &server_ip,
         server_ipv6.as_ref(),
-        &config.dkim_selector,
+        selector,
         local_dkim_pubkey.as_deref(),
     );
 
     let server_ipv6_str = server_ipv6.map(|ip| ip.to_string());
     let mut records = setup::generate_dns_records(
-        &config.domain,
+        primary_domain,
         &server_ip.to_string(),
         server_ipv6_str.as_deref(),
         local_dkim_pubkey
@@ -233,7 +381,7 @@ fn gather_dns_section(config: &Config, net: &dyn NetworkOps) -> Option<DnsSectio
             .map(|p| format!("v=DKIM1; k=rsa; p={p}"))
             .unwrap_or_default()
             .as_str(),
-        &config.dkim_selector,
+        selector,
     );
 
     // Without a local DKIM public key on disk we have no authoritative value
@@ -241,7 +389,7 @@ fn gather_dns_section(config: &Config, net: &dyn NetworkOps) -> Option<DnsSectio
     // suppressed. The DKIM DNS check itself still runs (it just verifies the
     // record exists) and its FAIL/MISSING badge is still rendered.
     if local_dkim_pubkey.is_none() {
-        let dkim_name = format!("{}._domainkey.{}", config.dkim_selector, config.domain);
+        let dkim_name = format!("{selector}._domainkey.{primary_domain}");
         records.retain(|r| !(r.record_type == "TXT" && r.name == dkim_name));
     }
 
@@ -532,18 +680,71 @@ pub fn format_status(info: &StatusInfo) -> String {
     let mut out = String::new();
 
     out.push_str(&format!("{}\n", term::header("Configuration")));
-    out.push_str(&format!("Domain:           {}\n", info.domain));
-    out.push_str(&format!("Config file:      {}\n", info.config_path));
-    out.push_str(&format!("Data directory:   {}\n", info.data_dir));
-    out.push_str(&format!("DKIM selector:    {}\n", info.dkim_selector));
-    out.push_str(&format!(
-        "DKIM key:         {}\n",
-        if info.dkim_key_present {
-            term::success("present")
-        } else {
-            term::warn("MISSING - run `aimx dkim-keygen`")
+
+    // Single-domain installs render the historical flat output
+    // (`Domain:` + `DKIM selector:` + `DKIM key:`) so v1 operators
+    // see no change. Multi-domain installs render a `Domains:` block
+    // with one row per configured domain, the `[default]` marker on
+    // `domains[0]`, and per-domain DKIM status + counts.
+    let multi_domain = info.domains.len() > 1;
+    if !multi_domain {
+        out.push_str(&format!("Domain:           {}\n", info.domain));
+        out.push_str(&format!("Config file:      {}\n", info.config_path));
+        out.push_str(&format!("Data directory:   {}\n", info.data_dir));
+        out.push_str(&format!("DKIM selector:    {}\n", info.dkim_selector));
+        out.push_str(&format!(
+            "DKIM key:         {}\n",
+            if info.dkim_key_present {
+                term::success("present")
+            } else {
+                term::warn("MISSING - run `aimx dkim-keygen`")
+            }
+        ));
+    } else {
+        out.push_str(&format!("Config file:      {}\n", info.config_path));
+        out.push_str(&format!("Data directory:   {}\n", info.data_dir));
+        out.push_str(&format!(
+            "Domains:          {} configured\n",
+            info.domains.len()
+        ));
+        for dom in &info.domains {
+            let default_marker = if dom.is_default {
+                format!(" {}", term::dim("[default]"))
+            } else {
+                String::new()
+            };
+            out.push_str(&format!(
+                "  {}{}\n",
+                term::highlight(&dom.domain),
+                default_marker,
+            ));
+            out.push_str(&format!("      DKIM selector: {}\n", dom.dkim_selector,));
+            out.push_str(&format!(
+                "      DKIM key:      {}\n",
+                if dom.dkim_key_present {
+                    term::success("present")
+                } else {
+                    term::warn(&format!(
+                        "MISSING - run `aimx dkim-keygen --domain {}`",
+                        dom.domain,
+                    ))
+                },
+            ));
+            if let Some(dns) = &dom.dkim_dns {
+                let rendered = match dns {
+                    DnsVerifyResult::Pass => term::success("PASS").to_string(),
+                    DnsVerifyResult::Fail(msg) => format!("{} - {msg}", term::fail_mark()),
+                    DnsVerifyResult::Missing(msg) => format!("{} - {msg}", term::fail_mark()),
+                    DnsVerifyResult::Warn(msg) => format!("{} - {msg}", term::warn_mark()),
+                };
+                out.push_str(&format!("      DKIM DNS:      {rendered}\n"));
+            }
+            out.push_str(&format!(
+                "      Mailboxes:     {} ({} unread)\n",
+                dom.mailbox_count, dom.unread_count,
+            ));
         }
-    ));
+    }
     out.push_str(&format!(
         "Global trust:     {}\n",
         term::info(&info.default_trust),
@@ -815,37 +1016,50 @@ pub fn check_mailbox_ownership(config: &Config) -> Vec<DoctorFinding> {
 
     // Orphan-storage findings: directories under `inbox/` / `sent/`
     // with no matching config entry (left behind by a removed mailbox).
-    for root in ["inbox", "sent"] {
-        let root_dir = config.data_dir.join(root);
-        let Ok(entries) = std::fs::read_dir(&root_dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let Ok(meta) = entry.metadata() else { continue };
-            if !meta.is_dir() {
+    //
+    // Iterates per-domain roots on the v2 (post-migration) layout
+    // (`<data_dir>/<domain>/inbox/`, `<data_dir>/<domain>/sent/`) and
+    // the legacy single root on v1. `Config::storage_roots` owns the
+    // layout-aware decision. Per-domain roots that have not been
+    // provisioned (e.g. a freshly added domain with no mailboxes
+    // yet) silently skip via the `read_dir` error path.
+    for storage_root in config.storage_roots() {
+        for kind in ["inbox", "sent"] {
+            let root_dir = storage_root.join(kind);
+            let Ok(entries) = std::fs::read_dir(&root_dir) else {
                 continue;
-            }
-            let name = match entry.file_name().into_string() {
-                Ok(n) => n,
-                Err(_) => continue,
             };
-            if configured_names.contains(&name) {
-                continue;
+            for entry in entries.flatten() {
+                let Ok(meta) = entry.metadata() else { continue };
+                if !meta.is_dir() {
+                    continue;
+                }
+                let name = match entry.file_name().into_string() {
+                    Ok(n) => n,
+                    Err(_) => continue,
+                };
+                if configured_names.contains(&name) {
+                    continue;
+                }
+                out.push(
+                    DoctorFinding::new(
+                        "ORPHAN-STORAGE",
+                        FindingSeverity::Warn,
+                        format!(
+                            "storage directory `{}/{name}/` has no matching \
+                             mailbox in config.toml",
+                            root_dir
+                                .strip_prefix(&config.data_dir)
+                                .unwrap_or(Path::new(kind))
+                                .display(),
+                        ),
+                    )
+                    .with_fix(format!(
+                        "remove the stale directory or add a matching `[mailboxes.{name}]` \
+                         block to config.toml",
+                    )),
+                );
             }
-            out.push(
-                DoctorFinding::new(
-                    "ORPHAN-STORAGE",
-                    FindingSeverity::Warn,
-                    format!(
-                        "storage directory `{root}/{name}/` has no matching \
-                         mailbox in config.toml"
-                    ),
-                )
-                .with_fix(format!(
-                    "remove the stale directory or add a matching `[mailboxes.{name}]` \
-                     block to config.toml",
-                )),
-            );
         }
     }
 
@@ -1210,6 +1424,15 @@ mod version_render_tests {
             config_path: "/etc/aimx/config.toml".to_string(),
             dkim_selector: "aimx".to_string(),
             dkim_key_present: true,
+            domains: vec![DomainStatus {
+                domain: "example.com".to_string(),
+                is_default: true,
+                dkim_selector: "aimx".to_string(),
+                dkim_key_present: true,
+                dkim_dns: None,
+                mailbox_count: 0,
+                unread_count: 0,
+            }],
             smtp_running: true,
             client_version: client,
             server_version: server,
@@ -1335,5 +1558,397 @@ mod version_render_tests {
         );
         let out = strip_ansi(&format_version_lines(&info));
         assert!(out.contains("(daemon not running)"), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod dkim_layout_tests {
+    //! Exercise the layout-aware DKIM key probe in `gather_status_with_ops`.
+    //!
+    //! Pre-fix, this code read `<dkim_dir>/private.key` directly, so a
+    //! post-migration install (where the key has moved to
+    //! `<dkim_dir>/<default_domain>/private.key`) reported DKIM as
+    //! MISSING and steered the operator into regenerating the key.
+    //! These tests pin the fix: the probe routes through
+    //! `resolve_active_dkim_dir` and reports `present` from the
+    //! per-domain dir on a post-migration install.
+    use super::*;
+    use crate::config::Config;
+    use crate::config::test_env::ConfigDirOverride;
+    use crate::setup::tests::MockNetworkOps;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn write_canonical_config(path: &Path, domain: &str) {
+        let s = format!(
+            "domains = [\"{domain}\"]\n\n\
+             [mailboxes.\"info@{domain}\"]\n\
+             address = \"info@{domain}\"\n\
+             owner = \"ops\"\n",
+        );
+        fs::write(path, s).unwrap();
+    }
+
+    /// Post-migration (`.layout-version: 2` present), the DKIM key
+    /// lives at `<dkim_dir>/<default_domain>/private.key`. The probe
+    /// must report `present` even though the legacy
+    /// `<dkim_dir>/private.key` is gone.
+    #[test]
+    fn dkim_present_when_only_per_domain_key_exists() {
+        let tmp = TempDir::new().unwrap();
+        let config_dir = tmp.path().join("etc");
+        let data_dir = tmp.path().join("data");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::create_dir_all(&data_dir).unwrap();
+
+        // v2 layout marker — `resolve_active_dkim_dir` short-circuits
+        // on the per-domain key being present, but the marker is the
+        // load-bearing post-migration signal in production.
+        fs::write(data_dir.join(".layout-version"), "2\n").unwrap();
+
+        let cfg_path = config_dir.join("config.toml");
+        write_canonical_config(&cfg_path, "example.com");
+
+        // Per-domain DKIM dir + key only — no legacy `dkim/private.key`.
+        let per_domain_dkim = config_dir.join("dkim").join("example.com");
+        fs::create_dir_all(&per_domain_dkim).unwrap();
+        fs::write(per_domain_dkim.join("private.key"), b"stub").unwrap();
+
+        let _guard = ConfigDirOverride::set(&config_dir);
+        let mut config = Config::load_resolved().unwrap().0;
+        config.data_dir = data_dir.clone();
+
+        let sys = crate::setup::tests::MockSystemOps::default();
+        let net = MockNetworkOps {
+            server_ipv4: None,
+            ..Default::default()
+        };
+
+        let info = gather_status_with_ops(&config, &sys, &net);
+        assert!(
+            info.dkim_key_present,
+            "post-migration per-domain DKIM key should register as present"
+        );
+    }
+
+    /// Legacy v1 install (no marker, no per-domain dir). The probe
+    /// falls back to `<dkim_dir>/private.key`. Regression coverage so
+    /// the fix does not break the pre-migration path.
+    #[test]
+    fn dkim_present_on_legacy_v1_layout() {
+        let tmp = TempDir::new().unwrap();
+        let config_dir = tmp.path().join("etc");
+        let data_dir = tmp.path().join("data");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::create_dir_all(&data_dir).unwrap();
+
+        let cfg_path = config_dir.join("config.toml");
+        // Canonical-shape config is fine; the v1-vs-v2 layout decision
+        // is purely on-disk (`.layout-version` marker + per-domain
+        // dir presence), not on config shape.
+        write_canonical_config(&cfg_path, "example.com");
+
+        // Legacy key location only.
+        let dkim_dir = config_dir.join("dkim");
+        fs::create_dir_all(&dkim_dir).unwrap();
+        fs::write(dkim_dir.join("private.key"), b"stub").unwrap();
+
+        let _guard = ConfigDirOverride::set(&config_dir);
+        let mut config = Config::load_resolved().unwrap().0;
+        config.data_dir = data_dir.clone();
+
+        let sys = crate::setup::tests::MockSystemOps::default();
+        let net = MockNetworkOps {
+            server_ipv4: None,
+            ..Default::default()
+        };
+
+        let info = gather_status_with_ops(&config, &sys, &net);
+        assert!(
+            info.dkim_key_present,
+            "legacy-layout DKIM key should still register as present"
+        );
+    }
+
+    /// Genuine "missing" case: neither path holds a key. The probe
+    /// must report MISSING so the operator runs `aimx dkim-keygen`.
+    #[test]
+    fn dkim_missing_when_no_key_present() {
+        let tmp = TempDir::new().unwrap();
+        let config_dir = tmp.path().join("etc");
+        let data_dir = tmp.path().join("data");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::create_dir_all(&data_dir).unwrap();
+
+        let cfg_path = config_dir.join("config.toml");
+        write_canonical_config(&cfg_path, "example.com");
+
+        let _guard = ConfigDirOverride::set(&config_dir);
+        let mut config = Config::load_resolved().unwrap().0;
+        config.data_dir = data_dir.clone();
+
+        let sys = crate::setup::tests::MockSystemOps::default();
+        let net = MockNetworkOps {
+            server_ipv4: None,
+            ..Default::default()
+        };
+
+        let info = gather_status_with_ops(&config, &sys, &net);
+        assert!(
+            !info.dkim_key_present,
+            "no DKIM key on disk should register as missing"
+        );
+    }
+}
+
+#[cfg(test)]
+mod per_domain_render_tests {
+    //! Snapshot-style tests for the Configuration section's per-domain
+    //! rendering. Single-domain installs keep the historical flat
+    //! output (no `Domains:` block, `Domain:` line as before).
+    //! Multi-domain installs render a `Domains:` block with per-domain
+    //! rows.
+    use super::*;
+
+    fn strip_ansi(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let bytes = s.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+                i += 2;
+                while i < bytes.len() && bytes[i] != b'm' {
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    i += 1;
+                }
+            } else {
+                out.push(bytes[i] as char);
+                i += 1;
+            }
+        }
+        out
+    }
+
+    fn one_domain_status() -> StatusInfo {
+        StatusInfo {
+            domain: "example.com".to_string(),
+            data_dir: "/tmp/aimx".to_string(),
+            config_path: "/etc/aimx/config.toml".to_string(),
+            dkim_selector: "aimx".to_string(),
+            dkim_key_present: true,
+            domains: vec![DomainStatus {
+                domain: "example.com".to_string(),
+                is_default: true,
+                dkim_selector: "aimx".to_string(),
+                dkim_key_present: true,
+                dkim_dns: None,
+                mailbox_count: 2,
+                unread_count: 0,
+            }],
+            smtp_running: true,
+            client_version: ClientVersion {
+                tag: "v1.0".into(),
+                git_hash: "deadbeef".into(),
+            },
+            server_version: None,
+            stale_send_sock_present: false,
+            default_trust: "none".to_string(),
+            default_trusted_senders: vec![],
+            mailboxes: vec![],
+            dns: None,
+        }
+    }
+
+    fn two_domain_status() -> StatusInfo {
+        StatusInfo {
+            domain: "a.com".to_string(),
+            data_dir: "/tmp/aimx".to_string(),
+            config_path: "/etc/aimx/config.toml".to_string(),
+            dkim_selector: "aimx".to_string(),
+            dkim_key_present: true,
+            domains: vec![
+                DomainStatus {
+                    domain: "a.com".to_string(),
+                    is_default: true,
+                    dkim_selector: "aimx".to_string(),
+                    dkim_key_present: true,
+                    dkim_dns: Some(DnsVerifyResult::Pass),
+                    mailbox_count: 2,
+                    unread_count: 1,
+                },
+                DomainStatus {
+                    domain: "b.com".to_string(),
+                    is_default: false,
+                    dkim_selector: "s2025".to_string(),
+                    dkim_key_present: false,
+                    dkim_dns: Some(DnsVerifyResult::Missing("No DKIM record found".into())),
+                    mailbox_count: 1,
+                    unread_count: 0,
+                },
+            ],
+            smtp_running: true,
+            client_version: ClientVersion {
+                tag: "v1.0".into(),
+                git_hash: "deadbeef".into(),
+            },
+            server_version: None,
+            stale_send_sock_present: false,
+            default_trust: "none".to_string(),
+            default_trusted_senders: vec![],
+            mailboxes: vec![],
+            dns: None,
+        }
+    }
+
+    #[test]
+    fn single_domain_keeps_flat_configuration_layout() {
+        let info = one_domain_status();
+        let out = strip_ansi(&format_status(&info));
+        // Flat layout: `Domain:` line + DKIM selector + DKIM key.
+        assert!(out.contains("Domain:           example.com"), "{out}");
+        assert!(out.contains("DKIM selector:    aimx"), "{out}");
+        assert!(out.contains("DKIM key:         present"), "{out}");
+        // No per-domain block on single-domain installs.
+        assert!(
+            !out.contains("Domains:"),
+            "single-domain must not render multi-domain block: {out}"
+        );
+        assert!(
+            !out.contains("[default]"),
+            "single-domain must not render default marker: {out}"
+        );
+    }
+
+    #[test]
+    fn multi_domain_renders_per_domain_block_with_default_marker() {
+        let info = two_domain_status();
+        let out = strip_ansi(&format_status(&info));
+        // No flat `Domain:` line on multi-domain installs.
+        assert!(
+            !out.contains("Domain:           a.com"),
+            "multi-domain must NOT render the flat `Domain:` line: {out}"
+        );
+        // Multi-domain block header.
+        assert!(out.contains("Domains:          2 configured"), "{out}");
+        // Each domain appears as a header line.
+        assert!(out.contains("a.com"), "{out}");
+        assert!(out.contains("b.com"), "{out}");
+        // Default marker on the first domain only.
+        assert!(out.contains("[default]"), "{out}");
+        // The default marker appears on the a.com line, not on b.com.
+        let a_idx = out.find("a.com").unwrap();
+        let b_idx = out.find("b.com").unwrap();
+        let default_idx = out.find("[default]").unwrap();
+        assert!(
+            a_idx < default_idx && default_idx < b_idx,
+            "[default] marker must sit between `a.com` and `b.com`: {out}"
+        );
+    }
+
+    #[test]
+    fn multi_domain_renders_per_domain_dkim_selector_and_key_status() {
+        let info = two_domain_status();
+        let out = strip_ansi(&format_status(&info));
+        // a.com: selector "aimx", key present.
+        assert!(out.contains("DKIM selector: aimx"), "{out}");
+        assert!(out.contains("DKIM key:      present"), "{out}");
+        // b.com: selector "s2025", key MISSING with helpful hint.
+        assert!(out.contains("DKIM selector: s2025"), "{out}");
+        assert!(
+            out.contains("MISSING - run `aimx dkim-keygen --domain b.com`"),
+            "missing-key hint must reference per-domain flag: {out}"
+        );
+    }
+
+    #[test]
+    fn multi_domain_renders_per_domain_mailbox_counts() {
+        let info = two_domain_status();
+        let out = strip_ansi(&format_status(&info));
+        assert!(out.contains("Mailboxes:     2 (1 unread)"), "{out}");
+        assert!(out.contains("Mailboxes:     1 (0 unread)"), "{out}");
+    }
+
+    #[test]
+    fn multi_domain_renders_per_domain_dkim_dns_status() {
+        let info = two_domain_status();
+        let out = strip_ansi(&format_status(&info));
+        // a.com: DNS pass; b.com: DNS missing record.
+        assert!(
+            out.contains("DKIM DNS:      PASS"),
+            "passing per-domain DKIM DNS line missing: {out}"
+        );
+        assert!(
+            out.contains("No DKIM record found"),
+            "missing per-domain DKIM DNS line missing: {out}"
+        );
+    }
+
+    #[test]
+    fn single_domain_omits_per_domain_dkim_dns_line() {
+        // The flat single-domain layout already surfaces DKIM DNS health
+        // inside the DNS section, so the per-domain block doesn't appear
+        // and the dedicated `DKIM DNS:` line must stay suppressed.
+        let info = one_domain_status();
+        let out = strip_ansi(&format_status(&info));
+        assert!(
+            !out.contains("DKIM DNS:"),
+            "single-domain must not render per-domain DKIM DNS line: {out}"
+        );
+    }
+
+    #[test]
+    fn count_mailboxes_for_domain_partitions_correctly() {
+        let statuses = vec![
+            MailboxStatus {
+                name: "info@a.com".to_string(),
+                address: "info@a.com".to_string(),
+                total: 2,
+                unread: 1,
+                trust: "none".to_string(),
+                trusted_senders_count: 0,
+                hook_count: 0,
+                owner: "alice".to_string(),
+                owner_uid: Some(1000),
+                is_catchall: false,
+            },
+            MailboxStatus {
+                name: "support@a.com".to_string(),
+                address: "support@a.com".to_string(),
+                total: 0,
+                unread: 0,
+                trust: "none".to_string(),
+                trusted_senders_count: 0,
+                hook_count: 0,
+                owner: "alice".to_string(),
+                owner_uid: Some(1000),
+                is_catchall: false,
+            },
+            MailboxStatus {
+                name: "info@b.com".to_string(),
+                address: "info@b.com".to_string(),
+                total: 1,
+                unread: 1,
+                trust: "none".to_string(),
+                trusted_senders_count: 0,
+                hook_count: 0,
+                owner: "bob".to_string(),
+                owner_uid: Some(2000),
+                is_catchall: false,
+            },
+        ];
+        let (count_a, unread_a) = count_mailboxes_for_domain(&statuses, "a.com");
+        assert_eq!(count_a, 2);
+        assert_eq!(unread_a, 1);
+
+        let (count_b, unread_b) = count_mailboxes_for_domain(&statuses, "b.com");
+        assert_eq!(count_b, 1);
+        assert_eq!(unread_b, 1);
+
+        // Unknown domain partitions to zero.
+        let (count_c, unread_c) = count_mailboxes_for_domain(&statuses, "c.com");
+        assert_eq!(count_c, 0);
+        assert_eq!(unread_c, 0);
     }
 }

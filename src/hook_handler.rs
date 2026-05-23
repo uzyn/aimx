@@ -60,9 +60,12 @@ pub async fn handle_hook_create(
 ) -> AckResponse {
     // Resolve the target mailbox up front so the authz check runs
     // against the same snapshot the rest of the handler will build on.
+    // Multi-domain: accept either FQDN keys (`alice@a.com`) or legacy
+    // local-part names (`alice`) — the resolver normalizes to the
+    // in-memory key.
     let snapshot = mb_ctx.config_handle.load();
-    let mailbox_cfg = match snapshot.mailboxes.get(&req.mailbox) {
-        Some(m) => m.clone(),
+    let (resolved_mailbox, mailbox_cfg) = match snapshot.resolve_mailbox_by_name(&req.mailbox) {
+        Some((k, m)) => (k.to_string(), m.clone()),
         None => {
             return AckResponse::Err {
                 code: ErrCode::Enoent,
@@ -72,7 +75,7 @@ pub async fn handle_hook_create(
     };
 
     if let Err(reject) =
-        enforce_mailbox_owner_or_root("HOOK-CREATE", caller, &req.mailbox, &mailbox_cfg)
+        enforce_mailbox_owner_or_root("HOOK-CREATE", caller, &resolved_mailbox, &mailbox_cfg)
     {
         return AckResponse::Err {
             code: reject.code,
@@ -158,7 +161,7 @@ pub async fn handle_hook_create(
     // Acquire the same lock hierarchy mailbox CRUD takes: outer per-
     // mailbox lock (shared with ingest / MARK-* / MAILBOX-CRUD), inner
     // process-wide config write lock. Always outer → inner.
-    let state = state_ctx.lock_for(&req.mailbox);
+    let state = state_ctx.lock_for(&resolved_mailbox);
     let _guard = state.lock.lock().await;
     let _config_guard = CONFIG_WRITE_LOCK
         .lock()
@@ -166,7 +169,7 @@ pub async fn handle_hook_create(
 
     let current = mb_ctx.config_handle.load();
     let mut new_config: Config = (*current).clone();
-    let mb = match new_config.mailboxes.get_mut(&req.mailbox) {
+    let mb = match new_config.mailboxes.get_mut(&resolved_mailbox) {
         Some(m) => m,
         None => {
             return AckResponse::Err {
@@ -424,12 +427,13 @@ mod tests {
             },
         );
         Config {
-            domain: "example.com".to_string(),
+            domains: vec!["example.com".to_string()],
             data_dir: data_dir.to_path_buf(),
-            dkim_selector: "aimx".to_string(),
+            dkim_selector: Some("aimx".to_string()),
             trust: "none".to_string(),
             trusted_senders: vec![],
             mailboxes,
+            per_domain: std::collections::HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
             signature: None,

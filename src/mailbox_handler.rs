@@ -207,8 +207,11 @@ pub async fn handle_mailbox_crud(
         // "mailbox exists but caller doesn't own it" paths must
         // produce a string-identical wire response so the daemon
         // doesn't leak whether the mailbox exists.
+        //
+        // Multi-domain: accept either the legacy local-part key or the
+        // canonical FQDN key by routing through `resolve_mailbox_by_name`.
         let current = mb_ctx.config_handle.load();
-        let mb_cfg = current.mailboxes.get(&req.name);
+        let mb_cfg = current.resolve_mailbox_by_name(&req.name).map(|(_, m)| m);
         if let Err(e) = authorize(
             caller.uid,
             Action::MailboxDelete {
@@ -316,14 +319,17 @@ fn resolve_owner_ids(owner: &str) -> Result<(u32, u32), String> {
 // verb argument that reintroduces the same `format!` chain at every
 // call site. The spelled-out pattern stays more scannable.
 fn handle_create(
-    state_ctx: &StateContext,
+    _state_ctx: &StateContext,
     mb_ctx: &MailboxContext,
     name: &str,
     owner: &str,
 ) -> AckResponse {
     let current = mb_ctx.config_handle.load();
 
-    if current.mailboxes.contains_key(name) {
+    // Multi-domain: a "duplicate" check has to look up by either the
+    // bare local-part the caller passed or the canonical FQDN key the
+    // in-memory map uses. The resolver handles both.
+    if current.resolve_mailbox_by_name(name).is_some() {
         return AckResponse::Err {
             code: ErrCode::Mailbox,
             reason: format!("mailbox '{name}' already exists"),
@@ -343,9 +349,12 @@ fn handle_create(
         }
     };
 
-    let data_dir = &state_ctx.data_dir;
-    let inbox = data_dir.join("inbox").join(name);
-    let sent = data_dir.join("sent").join(name);
+    // Route through the layout-aware `Config::inbox_dir` / `sent_dir`
+    // helpers so a post-migration daemon creates the new mailbox tree
+    // under `<data_dir>/<default_domain>/{inbox|sent}/<name>/` instead
+    // of the legacy `<data_dir>/{inbox|sent}/<name>/` location.
+    let inbox = current.inbox_dir(name);
+    let sent = current.sent_dir(name);
 
     // Track whether each dir existed before this call so the rollback
     // branches below never `remove_dir` an operator-created directory.
@@ -381,18 +390,20 @@ fn handle_create(
     // resolved-side chown uses this MailboxConfig so a future
     // `config.toml` reload would still agree with the on-disk owner.
     let mut new_config: Config = (*current).clone();
-    let address = format!("{name}@{}", new_config.domain);
+    let address = format!("{name}@{}", new_config.default_domain());
     let mb_cfg = MailboxConfig {
-        address,
+        address: address.clone(),
         owner: owner.to_string(),
         hooks: vec![],
         trust: None,
         trusted_senders: None,
         allow_root_catchall: false,
     };
-    new_config
-        .mailboxes
-        .insert(name.to_string(), mb_cfg.clone());
+    // Insert FQDN-keyed so the in-memory map matches the shape produced
+    // by the carry-over re-key on daemon load. Keying by the bare
+    // local-part here would leave `resolve_mailbox_by_name("<name>@<default>")`
+    // returning `None` until the next restart fires the carry-over.
+    new_config.mailboxes.insert(address.clone(), mb_cfg.clone());
 
     // Chown + chmod the freshly-created dirs. Mode 0o700 means only
     // the owning user (and root) can traverse; this is the isolation
@@ -493,7 +504,7 @@ fn check_preexisting_dirs(inbox: &Path, sent: &Path, uid: u32, gid: u32) -> Opti
 }
 
 fn handle_delete(
-    state_ctx: &StateContext,
+    _state_ctx: &StateContext,
     mb_ctx: &MailboxContext,
     name: &str,
     force: bool,
@@ -506,17 +517,25 @@ fn handle_delete(
     }
 
     let current = mb_ctx.config_handle.load();
-    if !current.mailboxes.contains_key(name) {
-        return AckResponse::Err {
-            code: ErrCode::Mailbox,
-            reason: no_such_mailbox_reason(name),
-        };
-    }
-    drop(current);
+    // Multi-domain: accept either FQDN keys or bare local-parts.
+    let resolved_key = match current.resolve_mailbox_by_name(name) {
+        Some((k, _)) => k.to_string(),
+        None => {
+            return AckResponse::Err {
+                code: ErrCode::Mailbox,
+                reason: no_such_mailbox_reason(name),
+            };
+        }
+    };
 
-    let data_dir = &state_ctx.data_dir;
-    let inbox = data_dir.join("inbox").join(name);
-    let sent = data_dir.join("sent").join(name);
+    // Route through the layout-aware `Config::inbox_dir` / `sent_dir`
+    // helpers so a post-migration daemon wipes the per-domain tree
+    // (`<data_dir>/<from-domain>/{inbox|sent}/<local>/`) rather than
+    // the legacy `<data_dir>/{inbox|sent}/<name>/` location that the
+    // migration has already moved away from.
+    let inbox = current.inbox_dir(&resolved_key);
+    let sent = current.sent_dir(&resolved_key);
+    drop(current);
 
     // `force=true`: wipe inbox + sent contents under the same per-mailbox
     // lock that already guards the stanza removal. This eliminates the
@@ -550,7 +569,7 @@ fn handle_delete(
     let current = mb_ctx.config_handle.load();
 
     let mut new_config: Config = (*current).clone();
-    new_config.mailboxes.remove(name);
+    new_config.mailboxes.remove(&resolved_key);
 
     if let Err(e) = write_config_atomic(&mb_ctx.config_path, &new_config) {
         return AckResponse::Err {
@@ -638,12 +657,13 @@ mod tests {
             },
         );
         Config {
-            domain: "example.com".to_string(),
+            domains: vec!["example.com".to_string()],
             data_dir: data_dir.to_path_buf(),
-            dkim_selector: "aimx".to_string(),
+            dkim_selector: Some("aimx".to_string()),
             trust: "none".to_string(),
             trusted_senders: vec![],
             mailboxes,
+            per_domain: std::collections::HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
             signature: None,
@@ -762,13 +782,29 @@ mod tests {
         assert!(tmp.path().join("inbox").join("alice").is_dir());
         assert!(tmp.path().join("sent").join("alice").is_dir());
 
-        // config.toml reloads the new mailbox
+        // config.toml reloads the new mailbox under its FQDN key.
         let reloaded = Config::load_ignore_warnings(&mb_ctx.config_path).unwrap();
-        assert!(reloaded.mailboxes.contains_key("alice"));
-        assert_eq!(reloaded.mailboxes["alice"].address, "alice@example.com");
+        assert!(
+            reloaded.mailboxes.contains_key("alice@example.com"),
+            "new mailbox must land FQDN-keyed: {:?}",
+            reloaded.mailboxes.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            reloaded.mailboxes["alice@example.com"].address,
+            "alice@example.com"
+        );
 
-        // In-memory handle reflects the swap immediately.
-        assert!(mb_ctx.config_handle.load().mailboxes.contains_key("alice"));
+        // In-memory handle reflects the swap immediately, and the
+        // resolver reaches the new mailbox by both bare local-part and
+        // FQDN forms — proving the post-create state is consistent
+        // without waiting for the next daemon restart.
+        let live = mb_ctx.config_handle.load();
+        assert!(live.mailboxes.contains_key("alice@example.com"));
+        assert!(live.resolve_mailbox_by_name("alice").is_some());
+        assert!(
+            live.resolve_mailbox_by_name("alice@example.com").is_some(),
+            "FQDN lookup must succeed immediately post-create"
+        );
     }
 
     #[tokio::test]
@@ -966,8 +1002,14 @@ mod tests {
             other => panic!("expected Err(NONEMPTY), got {other:?}"),
         }
 
-        // Stanza still present
-        assert!(mb_ctx.config_handle.load().mailboxes.contains_key("alice"));
+        // Stanza still present (FQDN-keyed post-create).
+        assert!(
+            mb_ctx
+                .config_handle
+                .load()
+                .mailboxes
+                .contains_key("alice@example.com")
+        );
     }
 
     #[tokio::test]
@@ -1259,12 +1301,13 @@ mod tests {
             assert!(matches!(h.await.unwrap(), AckResponse::Ok));
         }
 
-        // Every stanza survives on disk.
+        // Every stanza survives on disk (FQDN-keyed post-create).
         let reloaded = Config::load_ignore_warnings(&mb_ctx.config_path).unwrap();
         for name in &names {
+            let fqdn = format!("{name}@example.com");
             assert!(
-                reloaded.mailboxes.contains_key(name),
-                "{name} missing on disk: {:?}",
+                reloaded.mailboxes.contains_key(&fqdn),
+                "{fqdn} missing on disk: {:?}",
                 reloaded.mailboxes.keys().collect::<Vec<_>>()
             );
         }
@@ -1272,9 +1315,10 @@ mod tests {
         // Every stanza survives in the live handle.
         let in_mem = mb_ctx.config_handle.load();
         for name in &names {
+            let fqdn = format!("{name}@example.com");
             assert!(
-                in_mem.mailboxes.contains_key(name),
-                "{name} missing in handle: {:?}",
+                in_mem.mailboxes.contains_key(&fqdn),
+                "{fqdn} missing in handle: {:?}",
                 in_mem.mailboxes.keys().collect::<Vec<_>>()
             );
         }
@@ -1575,9 +1619,13 @@ mod tests {
             ),
             "idempotent re-create should succeed"
         );
-        // Config stanza was still written.
+        // Config stanza was still written (FQDN-keyed).
         assert!(
-            mb_ctx.config_handle.load().mailboxes.contains_key("alice"),
+            mb_ctx
+                .config_handle
+                .load()
+                .mailboxes
+                .contains_key("alice@example.com"),
             "config must register the mailbox on idempotent re-create"
         );
     }
@@ -1614,9 +1662,8 @@ mod tests {
         assert!(matches!(resp, AckResponse::Ok), "{resp:?}");
 
         let cfg = mb_ctx.config_handle.load();
-        let stanza = cfg
-            .mailboxes
-            .get("x")
+        let (_, stanza) = cfg
+            .resolve_mailbox_by_name("x")
             .expect("mailbox stanza must be present after Ok");
 
         let expected_owner =
@@ -1809,15 +1856,29 @@ mod tests {
 
         let r1 = handle_mailbox_crud(&state_ctx, &mb_ctx, &create_req, &caller).await;
         assert!(matches!(r1, AckResponse::Ok), "create #1: {r1:?}");
-        assert!(mb_ctx.config_handle.load().mailboxes.contains_key("task42"));
+        assert!(
+            mb_ctx
+                .config_handle
+                .load()
+                .mailboxes
+                .contains_key("task42@example.com")
+        );
 
         let r2 = handle_mailbox_crud(&state_ctx, &mb_ctx, &delete_req, &caller).await;
         assert!(matches!(r2, AckResponse::Ok), "delete: {r2:?}");
-        assert!(!mb_ctx.config_handle.load().mailboxes.contains_key("task42"));
+        let after_delete = mb_ctx.config_handle.load();
+        assert!(!after_delete.mailboxes.contains_key("task42"));
+        assert!(!after_delete.mailboxes.contains_key("task42@example.com"));
 
         let r3 = handle_mailbox_crud(&state_ctx, &mb_ctx, &create_req, &caller).await;
         assert!(matches!(r3, AckResponse::Ok), "create #2: {r3:?}");
-        assert!(mb_ctx.config_handle.load().mailboxes.contains_key("task42"));
+        assert!(
+            mb_ctx
+                .config_handle
+                .load()
+                .mailboxes
+                .contains_key("task42@example.com")
+        );
     }
 
     #[tokio::test]

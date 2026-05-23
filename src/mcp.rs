@@ -257,9 +257,9 @@ impl AimxMcpServer {
             | crate::auth::Action::MarkReadWrite(n)
             | crate::auth::Action::HookCrud(n) => n.clone(),
             crate::auth::Action::MailboxDelete { mailbox } => mailbox.clone(),
-            crate::auth::Action::MailboxCreate { .. } | crate::auth::Action::SystemCommand => {
-                String::new()
-            }
+            crate::auth::Action::MailboxCreate { .. }
+            | crate::auth::Action::SystemCommand
+            | crate::auth::Action::DomainCrud => String::new(),
         };
         // Derive the rendering verb from the action so a future change
         // that produces `OwnerMismatch` from a non-create predicate
@@ -272,7 +272,10 @@ impl AimxMcpServer {
         let mb = if mailbox_name.is_empty() {
             None
         } else {
-            config.mailboxes.get(&mailbox_name)
+            // Multi-domain: accept either FQDN keys or bare local-parts.
+            config
+                .resolve_mailbox_by_name(&mailbox_name)
+                .map(|(_, m)| m)
         };
         crate::auth::authorize(self.caller_uid, action, mb).map_err(|e| {
             // Sprint 3 (S3-5): the MCP, CLI, and hooks surfaces all
@@ -303,7 +306,10 @@ impl AimxMcpServer {
     #[tool(
         name = "mailbox_list",
         description = "List mailboxes the caller owns, with message counts. \
-                       Mailboxes the caller does not own are absent — root sees all."
+                       Mailboxes the caller does not own are absent — root sees all. \
+                       Mailbox names are returned in FQDN form (`<local>@<domain>`); \
+                       on multi-domain installs the same local-part may appear under \
+                       multiple domains."
     )]
     fn mailbox_list(&self) -> Result<String, String> {
         // The daemon is the single source of truth: it resolves the
@@ -318,7 +324,11 @@ impl AimxMcpServer {
     #[tool(
         name = "email_list",
         description = "List emails in a mailbox, paginated by descending filename. \
-                       Returns a JSON array; agents filter client-side."
+                       Returns a JSON array; agents filter client-side. The `mailbox` \
+                       parameter accepts either FQDN (`info@a.com`) or bare local-part \
+                       (`info`); bare local-parts resolve against the default domain \
+                       (`domains[0]`). Each returned row carries a `mailbox` field with \
+                       the FQDN of the parent mailbox."
     )]
     fn email_list(
         &self,
@@ -339,10 +349,22 @@ impl AimxMcpServer {
         let limit = clamp_limit(params.limit);
         let offset = params.offset.unwrap_or(0) as usize;
 
-        list_email_page_json(&mailbox_dir, folder, offset, limit).map_err(|e| e.to_string())
+        // Pass the resolved FQDN (from MAILBOX-LIST's `address` field
+        // when registered, else the daemon-side `name` which is the
+        // FQDN on post-rekey installs) so each row carries
+        // `mailbox = "<local>@<domain>"` regardless of whether the
+        // agent passed bare local-part or FQDN input.
+        let mailbox_fqdn = row.address.clone().unwrap_or_else(|| row.name.clone());
+        list_email_page_json(&mailbox_dir, &mailbox_fqdn, folder, offset, limit)
+            .map_err(|e| e.to_string())
     }
 
-    #[tool(name = "email_read", description = "Read the full content of an email")]
+    #[tool(
+        name = "email_read",
+        description = "Read the full content of an email. The `mailbox` parameter \
+                       accepts either FQDN (`info@a.com`) or bare local-part (`info`); \
+                       bare local-parts resolve against the default domain (`domains[0]`)."
+    )]
     fn email_read(
         &self,
         Parameters(params): Parameters<EmailReadParams>,
@@ -369,7 +391,9 @@ impl AimxMcpServer {
     #[tool(
         name = "email_mark_read",
         description = "Mark an inbox email as read. Sent-mail mark has no \
-                       agent use case and is not supported."
+                       agent use case and is not supported. The `mailbox` parameter \
+                       accepts either FQDN (`info@a.com`) or bare local-part (`info`); \
+                       bare local-parts resolve against the default domain (`domains[0]`)."
     )]
     fn email_mark_read(
         &self,
@@ -379,25 +403,40 @@ impl AimxMcpServer {
         // The daemon's MARK handler re-runs SO_PEERCRED-based authz;
         // the MCP-side row lookup is the friendly pre-flight that
         // surfaces "mailbox not found / not yours" as the opaque
-        // shared error rather than the daemon's wire reason.
-        let _row = lookup_mailbox_row(&params.mailbox)?;
+        // shared error rather than the daemon's wire reason. The
+        // resolved row's FQDN address (or daemon-side `name`, which
+        // is the FQDN on post-rekey installs) is echoed back so
+        // multi-domain agents see the unambiguous mailbox the action
+        // hit, regardless of whether they passed bare local-part or
+        // FQDN input.
+        let row = lookup_mailbox_row(&params.mailbox)?;
+        let mailbox_fqdn = row.address.clone().unwrap_or_else(|| row.name.clone());
         submit_mark_via_daemon(&params.mailbox, &params.id, true)?;
-        Ok(format!("Email '{}' marked as read.", params.id))
+        Ok(format!(
+            "Email '{}' in mailbox '{mailbox_fqdn}' marked as read.",
+            params.id
+        ))
     }
 
     #[tool(
         name = "email_mark_unread",
         description = "Mark an inbox email as unread. Sent-mail mark has no \
-                       agent use case and is not supported."
+                       agent use case and is not supported. The `mailbox` parameter \
+                       accepts either FQDN (`info@a.com`) or bare local-part (`info`); \
+                       bare local-parts resolve against the default domain (`domains[0]`)."
     )]
     fn email_mark_unread(
         &self,
         Parameters(params): Parameters<EmailMarkParams>,
     ) -> Result<String, String> {
         validate_email_id(&params.id)?;
-        let _row = lookup_mailbox_row(&params.mailbox)?;
+        let row = lookup_mailbox_row(&params.mailbox)?;
+        let mailbox_fqdn = row.address.clone().unwrap_or_else(|| row.name.clone());
         submit_mark_via_daemon(&params.mailbox, &params.id, false)?;
-        Ok(format!("Email '{}' marked as unread.", params.id))
+        Ok(format!(
+            "Email '{}' in mailbox '{mailbox_fqdn}' marked as unread.",
+            params.id
+        ))
     }
 
     #[tool(
@@ -559,7 +598,8 @@ impl AimxMcpServer {
         // The daemon's HOOK-CREATE handler runs the central
         // `authorize()` predicate again — this pre-flight only exists
         // for a friendly error vs. relying on the daemon's wire shape.
-        let _row = lookup_mailbox_row(&params.mailbox)?;
+        let row = lookup_mailbox_row(&params.mailbox)?;
+        let mailbox_fqdn = row.address.clone().unwrap_or_else(|| row.name.clone());
 
         if params.cmd.is_empty() {
             return Err("cmd must not be empty".to_string());
@@ -583,7 +623,10 @@ impl AimxMcpServer {
             params.name.as_deref(),
             body_bytes,
         ) {
-            Ok(()) => Ok(format!("Hook created on mailbox '{}'.", params.mailbox,)),
+            // Echo the canonical FQDN, not whatever the agent typed,
+            // so multi-domain installs always render an unambiguous
+            // mailbox identifier in tool responses.
+            Ok(()) => Ok(format!("Hook created on mailbox '{mailbox_fqdn}'.")),
             Err(HookCrudFallback::SocketMissing) => {
                 Err("aimx daemon not running. Start with 'sudo systemctl start aimx'".to_string())
             }
@@ -615,11 +658,18 @@ impl AimxMcpServer {
         let Some(name) = params.mailbox.as_deref() else {
             return Ok(json);
         };
-        let _row = lookup_mailbox_row(name)?;
+        // Resolve the caller-supplied mailbox name (bare local-part
+        // or FQDN) to the canonical FQDN the daemon-side row carries.
+        // Without this, a non-FQDN filter on a multi-domain install
+        // would always return an empty list.
+        let row = lookup_mailbox_row(name)?;
+        let target_fqdn = row.address.clone().unwrap_or_else(|| row.name.clone());
         let rows: Vec<crate::hook_list_handler::HookListRow> =
             serde_json::from_str(&json).map_err(|e| format!("Failed to parse hook list: {e}"))?;
-        let filtered: Vec<crate::hook_list_handler::HookListRow> =
-            rows.into_iter().filter(|r| r.mailbox == name).collect();
+        let filtered: Vec<crate::hook_list_handler::HookListRow> = rows
+            .into_iter()
+            .filter(|r| r.mailbox.eq_ignore_ascii_case(&target_fqdn))
+            .collect();
         serde_json::to_string(&filtered).map_err(|e| format!("Failed to serialize: {e}"))
     }
 
@@ -679,7 +729,11 @@ impl AimxMcpServer {
                 // non-root MCP process. The daemon's listing is
                 // SO_PEERCRED-filtered to the caller's uid, so the
                 // just-created mailbox is always visible to the
-                // calling agent.
+                // calling agent. The FQDN form (`<local>@<domain>`)
+                // is the canonical multi-domain return shape; the
+                // empty-address fallback only fires on a daemon
+                // race (mailbox vanished between create and lookup)
+                // and explicitly echoes the agent-supplied name.
                 let address = lookup_mailbox_address(&params.name).unwrap_or_default();
                 if address.is_empty() {
                     Ok(format!("Mailbox '{}' created.", params.name))
@@ -729,8 +783,19 @@ impl AimxMcpServer {
         // dependency on local read access to `/etc/aimx/config.toml`
         // (which is `0640 root:root` in production, so the previous
         // direct config-load path inevitably failed for non-root agents).
+        //
+        // Best-effort FQDN echo: resolve the mailbox via the daemon
+        // before submitting the delete so we can echo the canonical
+        // FQDN in the success message. The lookup is a best-effort
+        // soft-failure pre-flight (the daemon enforces ownership
+        // again under lock); if the row is unreachable we fall back
+        // to the agent-supplied name in the success message.
+        let mailbox_fqdn = lookup_mailbox_row(&params.name)
+            .ok()
+            .and_then(|row| row.address.clone().or_else(|| Some(row.name.clone())))
+            .unwrap_or_else(|| params.name.clone());
         match submit_mailbox_crud_via_daemon(&params.name, false, None, force) {
-            Ok(()) => Ok(format!("Mailbox '{}' deleted.", params.name)),
+            Ok(()) => Ok(format!("Mailbox '{mailbox_fqdn}' deleted.")),
             Err(MailboxLifecycleFallback::SocketMissing) => {
                 Err("aimx daemon not running. Start with 'sudo systemctl start aimx'".to_string())
             }
@@ -1267,8 +1332,26 @@ fn lookup_mailbox_row(name: &str) -> Result<crate::mailbox_list_handler::Mailbox
     let json = submit_mailbox_list_via_daemon()?;
     let rows: Vec<crate::mailbox_list_handler::MailboxListRow> =
         serde_json::from_str(&json).map_err(|e| format!("Failed to parse mailbox list: {e}"))?;
-    rows.into_iter()
-        .find(|r| r.name == name)
+    // Multi-domain: agents may pass either the operator-friendly bare
+    // local-part (`"alice"`) or the canonical FQDN (`"alice@a.com"`).
+    // Match by exact key first, then fall back to "address ends in
+    // @<rest>" / "address.local_part matches name" so the bare form
+    // keeps working post-rekey.
+    rows.iter()
+        .find(|r| r.name.eq_ignore_ascii_case(name))
+        .cloned()
+        .or_else(|| {
+            // Bare-local-part / address-tail match.
+            rows.iter()
+                .find(|r| match r.address.as_deref() {
+                    Some(addr) => {
+                        let local = addr.rsplit_once('@').map(|(l, _)| l).unwrap_or(addr);
+                        local.eq_ignore_ascii_case(name) || addr.eq_ignore_ascii_case(name)
+                    }
+                    None => false,
+                })
+                .cloned()
+        })
         .ok_or_else(|| format!("Mailbox '{name}' does not exist."))
 }
 
@@ -1354,6 +1437,201 @@ async fn submit_hook_list_request(
 /// the [`MailboxLifecycleFallback`] shape used by the CRUD path.
 pub(crate) fn submit_mailbox_list_via_daemon_for_cli() -> Result<String, MailboxLifecycleFallback> {
     submit_mailbox_list_raw()
+}
+
+/// CLI-friendly variant for `DOMAIN-LIST`. Mirrors
+/// [`submit_mailbox_list_via_daemon_for_cli`] line-for-line so the
+/// `aimx domains list` CLI keeps the same SocketMissing / Daemon
+/// branching shape every other CRUD verb uses.
+pub(crate) fn submit_domain_list_via_daemon_for_cli() -> Result<String, MailboxLifecycleFallback> {
+    submit_domain_list_raw()
+}
+
+fn submit_domain_list_raw() -> Result<String, MailboxLifecycleFallback> {
+    let socket = crate::serve::aimx_socket_path();
+
+    let rt = tokio::runtime::Handle::try_current();
+    let io_result: Result<Vec<u8>, std::io::Error> = match rt {
+        Ok(handle) => {
+            tokio::task::block_in_place(|| handle.block_on(submit_domain_list_request(&socket)))
+        }
+        Err(_) => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| {
+                    MailboxLifecycleFallback::Daemon(format!("Failed to create tokio runtime: {e}"))
+                })?;
+            rt.block_on(submit_domain_list_request(&socket))
+        }
+    };
+
+    let raw = io_result.map_err(|e| {
+        if is_socket_missing(&e) {
+            MailboxLifecycleFallback::SocketMissing
+        } else {
+            MailboxLifecycleFallback::Daemon(format!(
+                "Failed to connect to aimx daemon at {}: {e}",
+                socket.display()
+            ))
+        }
+    })?;
+
+    // Reuse the MAILBOX-LIST decoder — wire shape is identical (status
+    // line + Content-Length + JSON body), only the JSON schema differs.
+    decode_mailbox_list_response(&raw).map_err(MailboxLifecycleFallback::Daemon)
+}
+
+async fn submit_domain_list_request(
+    socket_path: &std::path::Path,
+) -> Result<Vec<u8>, std::io::Error> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let stream = tokio::net::UnixStream::connect(socket_path).await?;
+    let (mut reader, mut writer) = stream.into_split();
+
+    send_protocol::write_domain_list_request(&mut writer).await?;
+    writer.shutdown().await.ok();
+
+    let mut buf = Vec::with_capacity(1024);
+    reader.read_to_end(&mut buf).await?;
+    Ok(buf)
+}
+
+/// Submit an `AIMX/1 DOMAIN-ADD` request over UDS. Returns a
+/// [`MailboxLifecycleFallback`] on failure so the CLI can decide
+/// whether to fall back to the direct on-disk edit (root) or
+/// hard-error (non-root).
+pub(crate) fn submit_domain_add_via_daemon(
+    domain: &str,
+    selector: Option<&str>,
+) -> Result<(), MailboxLifecycleFallback> {
+    let request = send_protocol::DomainAddRequest {
+        domain: domain.to_string(),
+        selector: selector.map(|s| s.to_string()),
+    };
+    let socket = crate::serve::aimx_socket_path();
+
+    let rt = tokio::runtime::Handle::try_current();
+    let io_result: Result<MarkOutcome, std::io::Error> = match rt {
+        Ok(handle) => tokio::task::block_in_place(|| {
+            handle.block_on(submit_domain_add_request(&socket, &request))
+        }),
+        Err(_) => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| {
+                    MailboxLifecycleFallback::Daemon(format!("Failed to create tokio runtime: {e}"))
+                })?;
+            rt.block_on(submit_domain_add_request(&socket, &request))
+        }
+    };
+
+    match io_result {
+        Ok(MarkOutcome::Ok) => Ok(()),
+        Ok(MarkOutcome::Err { code, reason }) => Err(MailboxLifecycleFallback::Daemon(format!(
+            "[{}] {reason}",
+            code.as_str()
+        ))),
+        Ok(MarkOutcome::Malformed(reason)) => Err(MailboxLifecycleFallback::Daemon(format!(
+            "Malformed response from aimx daemon: {reason}"
+        ))),
+        Err(e) => {
+            if is_socket_missing(&e) {
+                Err(MailboxLifecycleFallback::SocketMissing)
+            } else {
+                Err(MailboxLifecycleFallback::Daemon(format!(
+                    "Failed to connect to aimx daemon at {}: {e}",
+                    socket.display()
+                )))
+            }
+        }
+    }
+}
+
+async fn submit_domain_add_request(
+    socket_path: &std::path::Path,
+    request: &send_protocol::DomainAddRequest,
+) -> Result<MarkOutcome, std::io::Error> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let stream = tokio::net::UnixStream::connect(socket_path).await?;
+    let (mut reader, mut writer) = stream.into_split();
+
+    send_protocol::write_domain_add_request(&mut writer, request).await?;
+    writer.shutdown().await.ok();
+
+    let mut buf = Vec::with_capacity(128);
+    reader.read_to_end(&mut buf).await?;
+
+    Ok(parse_ack_response(&buf))
+}
+
+/// Submit an `AIMX/1 DOMAIN-REMOVE` request over UDS. Returns the
+/// daemon's JSON response body on success (which the CLI parses into
+/// a [`crate::domain_handler::DomainRemoveResponse`]) or a
+/// [`MailboxLifecycleFallback`] on failure so the CLI can decide
+/// whether to fall back to the direct on-disk edit (root) or hard-
+/// error (non-root).
+pub(crate) fn submit_domain_remove_via_daemon(
+    domain: &str,
+    force: bool,
+) -> Result<String, MailboxLifecycleFallback> {
+    let request = send_protocol::DomainRemoveRequest {
+        domain: domain.to_string(),
+        force,
+    };
+    let socket = crate::serve::aimx_socket_path();
+
+    let rt = tokio::runtime::Handle::try_current();
+    let io_result: Result<Vec<u8>, std::io::Error> = match rt {
+        Ok(handle) => tokio::task::block_in_place(|| {
+            handle.block_on(submit_domain_remove_request(&socket, &request))
+        }),
+        Err(_) => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| {
+                    MailboxLifecycleFallback::Daemon(format!("Failed to create tokio runtime: {e}"))
+                })?;
+            rt.block_on(submit_domain_remove_request(&socket, &request))
+        }
+    };
+
+    let raw = io_result.map_err(|e| {
+        if is_socket_missing(&e) {
+            MailboxLifecycleFallback::SocketMissing
+        } else {
+            MailboxLifecycleFallback::Daemon(format!(
+                "Failed to connect to aimx daemon at {}: {e}",
+                socket.display()
+            ))
+        }
+    })?;
+
+    // Reuse the MAILBOX-LIST / DOMAIN-LIST JSON ack decoder — wire
+    // shape is identical (status line + Content-Length + JSON body on
+    // OK; ERR <code> <reason> on failure).
+    decode_mailbox_list_response(&raw).map_err(MailboxLifecycleFallback::Daemon)
+}
+
+async fn submit_domain_remove_request(
+    socket_path: &std::path::Path,
+    request: &send_protocol::DomainRemoveRequest,
+) -> Result<Vec<u8>, std::io::Error> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let stream = tokio::net::UnixStream::connect(socket_path).await?;
+    let (mut reader, mut writer) = stream.into_split();
+
+    send_protocol::write_domain_remove_request(&mut writer, request).await?;
+    writer.shutdown().await.ok();
+
+    let mut buf = Vec::with_capacity(1024);
+    reader.read_to_end(&mut buf).await?;
+    Ok(buf)
 }
 
 fn submit_mailbox_list_raw() -> Result<String, MailboxLifecycleFallback> {
@@ -1488,9 +1766,12 @@ fn clamp_limit(raw: Option<u32>) -> usize {
 
 /// Inbox row shape — matches the JSON output of `email_list` for
 /// `folder = "inbox"`. `read` is always present and populated.
+/// `mailbox` echoes the resolved FQDN of the parent mailbox so agents
+/// listing emails across a multi-domain install can disambiguate.
 #[derive(Serialize)]
 struct InboxListRow {
     id: String,
+    mailbox: String,
     from: String,
     to: String,
     subject: String,
@@ -1501,10 +1782,13 @@ struct InboxListRow {
 /// Sent row shape — matches the JSON output of `email_list` for
 /// `folder = "sent"`. `read` is intentionally absent (agents never
 /// mark sent mail read/unread); `delivery_status` is the value from
-/// the outbound frontmatter, surfaced verbatim.
+/// the outbound frontmatter, surfaced verbatim. `mailbox` echoes the
+/// resolved FQDN of the parent mailbox (same shape as `InboxListRow`)
+/// so the two row shapes are uniform.
 #[derive(Serialize)]
 struct SentListRow {
     id: String,
+    mailbox: String,
     from: String,
     to: String,
     subject: String,
@@ -1584,6 +1868,7 @@ fn enumerate_email_ids(mailbox_dir: &std::path::Path) -> std::io::Result<Vec<(St
 /// intentional graceful degradation; do not "fix" it by backfilling.
 fn list_email_page_json(
     mailbox_dir: &std::path::Path,
+    mailbox_fqdn: &str,
     folder: Folder,
     offset: usize,
     limit: usize,
@@ -1610,6 +1895,7 @@ fn list_email_page_json(
                 };
                 rows.push(InboxListRow {
                     id: id.clone(),
+                    mailbox: mailbox_fqdn.to_string(),
                     from: fm.from,
                     to: fm.to,
                     subject: fm.subject,
@@ -1627,6 +1913,7 @@ fn list_email_page_json(
                 };
                 rows.push(SentListRow {
                     id: id.clone(),
+                    mailbox: mailbox_fqdn.to_string(),
                     from: fm.from,
                     to: fm.to,
                     subject: fm.subject,
@@ -1821,11 +2108,12 @@ fn set_read_status(
 ) -> Result<(), String> {
     validate_email_id(id)?;
 
-    if !config.mailboxes.contains_key(mailbox) {
-        return Err(format!("Mailbox '{mailbox}' does not exist."));
-    }
+    let resolved = config
+        .resolve_mailbox_by_name(mailbox)
+        .map(|(k, _)| k.to_string())
+        .ok_or_else(|| format!("Mailbox '{mailbox}' does not exist."))?;
 
-    let mailbox_dir = folder_dir(config, mailbox, folder);
+    let mailbox_dir = folder_dir(config, &resolved, folder);
     let filepath = resolve_email_path_strict(&mailbox_dir, id)
         .ok_or_else(|| format!("Email '{id}' not found in mailbox '{mailbox}'."))?;
 
@@ -1907,12 +2195,13 @@ mod auth_tests {
             );
         }
         Config {
-            domain: "agent.example.com".into(),
+            domains: vec!["agent.example.com".into()],
             data_dir: tmp.to_path_buf(),
-            dkim_selector: "aimx".into(),
+            dkim_selector: Some("aimx".into()),
             trust: "none".into(),
             trusted_senders: vec![],
             mailboxes,
+            per_domain: std::collections::HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
             signature: None,
@@ -2045,8 +2334,8 @@ mod email_list_tests {
         }
 
         fm_read_count_reset();
-        let json =
-            list_email_page_json(tmp.path(), Folder::Inbox, 2, 3).expect("page returns JSON");
+        let json = list_email_page_json(tmp.path(), "alice@example.com", Folder::Inbox, 2, 3)
+            .expect("page returns JSON");
         let reads = fm_read_count_reset();
         assert_eq!(reads, 3, "page-3 must read exactly 3 frontmatter blocks");
 
@@ -2064,8 +2353,8 @@ mod email_list_tests {
         let tmp = TempDir::new().unwrap();
         std::fs::create_dir_all(tmp.path()).unwrap();
         fm_read_count_reset();
-        let json =
-            list_email_page_json(tmp.path(), Folder::Inbox, 0, 50).expect("page returns JSON");
+        let json = list_email_page_json(tmp.path(), "alice@example.com", Folder::Inbox, 0, 50)
+            .expect("page returns JSON");
         assert_eq!(fm_read_count_reset(), 0);
         assert_eq!(json, "[]");
     }
@@ -2076,7 +2365,8 @@ mod email_list_tests {
         // not an error.
         let tmp = TempDir::new().unwrap();
         let phantom = tmp.path().join("does-not-exist");
-        let json = list_email_page_json(&phantom, Folder::Inbox, 0, 50).unwrap();
+        let json =
+            list_email_page_json(&phantom, "alice@example.com", Folder::Inbox, 0, 50).unwrap();
         assert_eq!(json, "[]");
     }
 
@@ -2088,7 +2378,8 @@ mod email_list_tests {
             write_inbox_md(tmp.path(), &id, "s@x.com", "S", false);
         }
         fm_read_count_reset();
-        let json = list_email_page_json(tmp.path(), Folder::Inbox, 99, 50).unwrap();
+        let json =
+            list_email_page_json(tmp.path(), "alice@example.com", Folder::Inbox, 99, 50).unwrap();
         assert_eq!(fm_read_count_reset(), 0);
         assert_eq!(json, "[]");
     }
@@ -2099,7 +2390,8 @@ mod email_list_tests {
         write_sent_md(tmp.path(), "2025-06-01-001", "delivered");
         write_sent_md(tmp.path(), "2025-06-01-002", "failed");
 
-        let json = list_email_page_json(tmp.path(), Folder::Sent, 0, 50).unwrap();
+        let json =
+            list_email_page_json(tmp.path(), "alice@example.com", Folder::Sent, 0, 50).unwrap();
         let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
         let rows = rows.as_array().unwrap();
         assert_eq!(rows.len(), 2);
@@ -2124,7 +2416,8 @@ mod email_list_tests {
         write_inbox_md(tmp.path(), "2025-06-01-001", "s@x.com", "S", false);
         write_inbox_md(tmp.path(), "2025-06-01-002", "s@x.com", "S", true);
 
-        let json = list_email_page_json(tmp.path(), Folder::Inbox, 0, 50).unwrap();
+        let json =
+            list_email_page_json(tmp.path(), "alice@example.com", Folder::Inbox, 0, 50).unwrap();
         let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
         let rows = rows.as_array().unwrap();
         assert_eq!(rows.len(), 2);
@@ -2136,6 +2429,42 @@ mod email_list_tests {
                 "inbox row must not carry `delivery_status`"
             );
         }
+    }
+
+    /// Every returned row carries the resolved FQDN as the `mailbox`
+    /// field — the canonical multi-domain return shape that lets
+    /// agents disambiguate when the same local-part exists under
+    /// multiple domains.
+    #[test]
+    fn inbox_rows_carry_mailbox_fqdn() {
+        let tmp = TempDir::new().unwrap();
+        write_inbox_md(tmp.path(), "2025-06-01-001", "s@x.com", "S", false);
+        write_inbox_md(tmp.path(), "2025-06-01-002", "s@x.com", "S", true);
+
+        let json = list_email_page_json(tmp.path(), "info@b.com", Folder::Inbox, 0, 50).unwrap();
+        let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let rows = rows.as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        for row in rows {
+            assert_eq!(
+                row["mailbox"], "info@b.com",
+                "inbox row must echo resolved FQDN: {row}"
+            );
+        }
+    }
+
+    /// `sent` rows likewise carry the FQDN `mailbox` field — the
+    /// shape is uniform across `folder = "inbox"` and `folder = "sent"`.
+    #[test]
+    fn sent_rows_carry_mailbox_fqdn() {
+        let tmp = TempDir::new().unwrap();
+        write_sent_md(tmp.path(), "2025-06-01-001", "delivered");
+
+        let json = list_email_page_json(tmp.path(), "info@b.com", Folder::Sent, 0, 50).unwrap();
+        let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let rows = rows.as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["mailbox"], "info@b.com");
     }
 
     #[test]
@@ -2158,7 +2487,8 @@ mod email_list_tests {
 
         fm_read_count_reset();
         let start = std::time::Instant::now();
-        let json = list_email_page_json(tmp.path(), Folder::Inbox, 0, 50).unwrap();
+        let json =
+            list_email_page_json(tmp.path(), "alice@example.com", Folder::Inbox, 0, 50).unwrap();
         let elapsed = start.elapsed();
         let reads = fm_read_count_reset();
 
@@ -2197,7 +2527,8 @@ mod email_list_tests {
             ids.push(id);
         }
 
-        let json = list_email_page_json(tmp.path(), Folder::Inbox, 0, 100).unwrap();
+        let json =
+            list_email_page_json(tmp.path(), "alice@example.com", Folder::Inbox, 0, 100).unwrap();
         let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
         let rows = rows.as_array().unwrap();
         assert_eq!(rows.len(), 100);
@@ -2245,7 +2576,8 @@ mod email_list_tests {
         // A flat `.md` next to the bundle.
         write_inbox_md(tmp.path(), "2025-06-01-002", "s@x.com", "S", false);
 
-        let json = list_email_page_json(tmp.path(), Folder::Inbox, 0, 50).unwrap();
+        let json =
+            list_email_page_json(tmp.path(), "alice@example.com", Folder::Inbox, 0, 50).unwrap();
         let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
         let rows = rows.as_array().unwrap();
         assert_eq!(rows.len(), 2);
@@ -2264,7 +2596,8 @@ mod email_list_tests {
         std::fs::create_dir_all(tmp.path().join("2025-06-01-002-broken")).unwrap();
         write_inbox_md(tmp.path(), "2025-06-01-003", "s@x.com", "S", false);
 
-        let json = list_email_page_json(tmp.path(), Folder::Inbox, 0, 50).unwrap();
+        let json =
+            list_email_page_json(tmp.path(), "alice@example.com", Folder::Inbox, 0, 50).unwrap();
         let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
         let rows = rows.as_array().unwrap();
         assert_eq!(rows.len(), 2, "broken bundle drops; neighbours surface");
@@ -2286,7 +2619,8 @@ mod email_list_tests {
         .unwrap();
         write_inbox_md(tmp.path(), "2025-06-01-003", "s@x.com", "S", false);
 
-        let json = list_email_page_json(tmp.path(), Folder::Inbox, 0, 50).unwrap();
+        let json =
+            list_email_page_json(tmp.path(), "alice@example.com", Folder::Inbox, 0, 50).unwrap();
         let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
         let rows = rows.as_array().unwrap();
         assert_eq!(rows.len(), 2);
@@ -2306,7 +2640,8 @@ mod email_list_tests {
         );
         std::fs::write(tmp.path().join(format!("{id}.md")), body).unwrap();
 
-        let json = list_email_page_json(tmp.path(), Folder::Sent, 0, 50).unwrap();
+        let json =
+            list_email_page_json(tmp.path(), "alice@example.com", Folder::Sent, 0, 50).unwrap();
         let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
         let rows = rows.as_array().unwrap();
         assert_eq!(rows.len(), 1);

@@ -27,10 +27,12 @@
 //!
 //! Always acquire outer → inner, never the reverse.
 
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::config::ConfigHandle;
+use crate::config::{Config, ConfigHandle};
 use crate::frontmatter::InboundFrontmatter;
 use crate::mailbox_locks::{MailboxLocks, MailboxState};
 use crate::mcp::resolve_email_path_strict;
@@ -49,7 +51,11 @@ pub struct StateContext {
     /// never changes; the `Config` swap path (MAILBOX-CRUD in
     /// `mailbox_handler.rs`) deliberately never rewrites `data_dir`, so
     /// this snapshot and the live handle's `data_dir` cannot diverge in
-    /// practice.
+    /// practice. Today every reader routes through the live
+    /// `config_handle` for layout-aware path resolution, but the field
+    /// is kept for tests and any pre-existing callers that still need
+    /// the raw root.
+    #[allow(dead_code)]
     pub data_dir: PathBuf,
     /// Live handle to the daemon's `Config`. MARK-* uses it to validate
     /// that the referenced mailbox exists at the time of the call (rather
@@ -113,8 +119,8 @@ fn validate_id(id: &str) -> Result<(), AckResponse> {
     Ok(())
 }
 
-fn inbox_dir(data_dir: &Path, mailbox: &str) -> PathBuf {
-    data_dir.join("inbox").join(mailbox)
+fn inbox_dir(config: &Config, mailbox: &str) -> PathBuf {
+    config.inbox_dir(mailbox)
 }
 
 /// Handle a `MARK-READ` / `MARK-UNREAD` request. Takes the shared
@@ -133,14 +139,15 @@ pub async fn handle_mark(ctx: &StateContext, req: &MarkRequest, caller: &Caller)
     // We return `ENOENT` (not `EACCES`) when the mailbox
     // is absent so the authz check itself cannot leak which mailboxes
     // exist. Once the mailbox resolves, the ownership check runs.
+    //
+    // Multi-domain: route through `Config::resolve_mailbox_by_name` so
+    // callers can pass the operator-friendly local-part (`"alice"`) on
+    // single-domain installs as well as the canonical FQDN
+    // (`"alice@a.com"`) on multi-domain installs. The resolver returns
+    // the canonical key the in-memory map uses.
     let config_snapshot = ctx.config_handle.load();
-    // `contains_key` + `get` is split to keep the existence check out
-    // of the authz error path, but the `get` must succeed on the
-    // snapshot we just checked. We match explicitly on `None` and
-    // return `ENOENT` so authz can never be silently skipped if a
-    // future refactor drops the `contains_key` pre-check.
-    let mailbox_cfg = match config_snapshot.mailboxes.get(&req.mailbox) {
-        Some(m) => m.clone(),
+    let (resolved_name, mailbox_cfg) = match config_snapshot.resolve_mailbox_by_name(&req.mailbox) {
+        Some((k, m)) => (k.to_string(), m.clone()),
         None => {
             return AckResponse::Err {
                 code: ErrCode::Enoent,
@@ -149,17 +156,17 @@ pub async fn handle_mark(ctx: &StateContext, req: &MarkRequest, caller: &Caller)
         }
     };
     let verb = if req.read { "MARK-READ" } else { "MARK-UNREAD" };
-    if let Err(reject) = enforce_mailbox_owner_or_root(verb, caller, &req.mailbox, &mailbox_cfg) {
+    if let Err(reject) = enforce_mailbox_owner_or_root(verb, caller, &resolved_name, &mailbox_cfg) {
         return AckResponse::Err {
             code: reject.code,
             reason: reject.reason,
         };
     }
 
-    let state = ctx.lock_for(&req.mailbox);
+    let state = ctx.lock_for(&resolved_name);
     let _guard = state.lock.lock().await;
 
-    let mailbox_dir = inbox_dir(&ctx.data_dir, &req.mailbox);
+    let mailbox_dir = inbox_dir(&config_snapshot, &resolved_name);
     let filepath = match resolve_email_path_strict(&mailbox_dir, &req.id) {
         Some(p) => p,
         None => {
@@ -358,12 +365,13 @@ mod tests {
             },
         );
         let config = crate::config::Config {
-            domain: "example.com".to_string(),
+            domains: vec!["example.com".to_string()],
             data_dir: data_dir.to_path_buf(),
-            dkim_selector: "aimx".to_string(),
+            dkim_selector: Some("aimx".to_string()),
             trust: "none".to_string(),
             trusted_senders: vec![],
             mailboxes,
+            per_domain: std::collections::HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
             signature: None,
@@ -705,12 +713,13 @@ mod tests {
             },
         );
         let config = crate::config::Config {
-            domain: "example.com".into(),
+            domains: vec!["example.com".into()],
             data_dir: tmp.path().to_path_buf(),
-            dkim_selector: "aimx".into(),
+            dkim_selector: Some("aimx".into()),
             trust: "none".into(),
             trusted_senders: vec![],
             mailboxes,
+            per_domain: std::collections::HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
             signature: None,
@@ -798,12 +807,13 @@ mod tests {
             },
         );
         let config = crate::config::Config {
-            domain: "example.com".into(),
+            domains: vec!["example.com".into()],
             data_dir: tmp.path().to_path_buf(),
-            dkim_selector: "aimx".into(),
+            dkim_selector: Some("aimx".into()),
             trust: "none".into(),
             trusted_senders: vec![],
             mailboxes,
+            per_domain: std::collections::HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
             signature: None,
@@ -894,12 +904,13 @@ mod tests {
             },
         );
         let config = crate::config::Config {
-            domain: "example.com".into(),
+            domains: vec!["example.com".into()],
             data_dir: tmp.path().to_path_buf(),
-            dkim_selector: "aimx".into(),
+            dkim_selector: Some("aimx".into()),
             trust: "none".into(),
             trusted_senders: vec![],
             mailboxes,
+            per_domain: std::collections::HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
             signature: None,
@@ -972,12 +983,13 @@ mod tests {
             );
         }
         let config = crate::config::Config {
-            domain: "example.com".into(),
+            domains: vec!["example.com".into()],
             data_dir: tmp.path().to_path_buf(),
-            dkim_selector: "aimx".into(),
+            dkim_selector: Some("aimx".into()),
             trust: "none".into(),
             trusted_senders: vec![],
             mailboxes,
+            per_domain: std::collections::HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
             signature: None,
