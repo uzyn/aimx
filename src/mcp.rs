@@ -1506,6 +1506,72 @@ async fn submit_domain_add_request(
     Ok(parse_ack_response(&buf))
 }
 
+/// Submit an `AIMX/1 DOMAIN-REMOVE` request over UDS. Returns the
+/// daemon's JSON response body on success (which the CLI parses into
+/// a [`crate::domain_handler::DomainRemoveResponse`]) or a
+/// [`MailboxLifecycleFallback`] on failure so the CLI can decide
+/// whether to fall back to the direct on-disk edit (root) or hard-
+/// error (non-root).
+pub(crate) fn submit_domain_remove_via_daemon(
+    domain: &str,
+    force: bool,
+) -> Result<String, MailboxLifecycleFallback> {
+    let request = send_protocol::DomainRemoveRequest {
+        domain: domain.to_string(),
+        force,
+    };
+    let socket = crate::serve::aimx_socket_path();
+
+    let rt = tokio::runtime::Handle::try_current();
+    let io_result: Result<Vec<u8>, std::io::Error> = match rt {
+        Ok(handle) => tokio::task::block_in_place(|| {
+            handle.block_on(submit_domain_remove_request(&socket, &request))
+        }),
+        Err(_) => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| {
+                    MailboxLifecycleFallback::Daemon(format!("Failed to create tokio runtime: {e}"))
+                })?;
+            rt.block_on(submit_domain_remove_request(&socket, &request))
+        }
+    };
+
+    let raw = io_result.map_err(|e| {
+        if is_socket_missing(&e) {
+            MailboxLifecycleFallback::SocketMissing
+        } else {
+            MailboxLifecycleFallback::Daemon(format!(
+                "Failed to connect to aimx daemon at {}: {e}",
+                socket.display()
+            ))
+        }
+    })?;
+
+    // Reuse the MAILBOX-LIST / DOMAIN-LIST JSON ack decoder — wire
+    // shape is identical (status line + Content-Length + JSON body on
+    // OK; ERR <code> <reason> on failure).
+    decode_mailbox_list_response(&raw).map_err(MailboxLifecycleFallback::Daemon)
+}
+
+async fn submit_domain_remove_request(
+    socket_path: &std::path::Path,
+    request: &send_protocol::DomainRemoveRequest,
+) -> Result<Vec<u8>, std::io::Error> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let stream = tokio::net::UnixStream::connect(socket_path).await?;
+    let (mut reader, mut writer) = stream.into_split();
+
+    send_protocol::write_domain_remove_request(&mut writer, request).await?;
+    writer.shutdown().await.ok();
+
+    let mut buf = Vec::with_capacity(1024);
+    reader.read_to_end(&mut buf).await?;
+    Ok(buf)
+}
+
 fn submit_mailbox_list_raw() -> Result<String, MailboxLifecycleFallback> {
     let socket = crate::serve::aimx_socket_path();
 

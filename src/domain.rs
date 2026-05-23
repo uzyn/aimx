@@ -306,16 +306,120 @@ fn print_dns_guidance_and_verify(
     Ok(())
 }
 
-/// Placeholder for `aimx domains remove`. The real cascade behaviour
-/// lands in a follow-up release; for now we surface a clear "not yet
-/// implemented" error so the clap surface is complete and operators
-/// see the same help text they will see post-rollout.
-fn remove(_domain: &str, _force: bool) -> Result<(), Box<dyn std::error::Error>> {
-    Err(
-        "`aimx domains remove` is not yet implemented; this command \
-         lands in a follow-up release."
-            .into(),
-    )
+/// `aimx domains remove <domain> [--force]` — UDS first, daemon-down
+/// fallback for root, hard-error for non-root.
+///
+/// The CLI consumes the daemon's structured `DOMAIN-REMOVE` response
+/// (`DomainRemoveResponse`) and renders one of three outcomes:
+///
+/// 1. **Clean remove** (no force, no blockers): "removed domain X
+///    from config" plus the DKIM-preserved hint pointing at
+///    `<dkim_dir>/<domain>/`.
+/// 2. **Blocked by mailboxes** (no force, blockers exist): numbered
+///    list of blocking mailbox FQDNs plus the `--force` suggestion.
+///    Exits non-zero.
+/// 3. **Force cascade complete**: per-mailbox deletion summary plus
+///    the storage-tree-removed line plus the DKIM-preserved hint.
+///
+/// Daemon-side errors (last-domain hard-block, unknown domain, authz)
+/// are surfaced verbatim with the canonical reason string. The
+/// last-domain hard-block additionally points at `aimx uninstall`.
+fn remove(domain: &str, force: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let normalized = domain.trim().to_ascii_lowercase();
+    if !crate::config::is_valid_domain_syntax(&normalized) {
+        return Err(format!("domain '{domain}' is not a valid RFC 1035 hostname").into());
+    }
+
+    match crate::mcp::submit_domain_remove_via_daemon(&normalized, force) {
+        Ok(body) => {
+            let response: crate::domain_handler::DomainRemoveResponse = serde_json::from_str(&body)
+                .map_err(|e| format!("malformed DOMAIN-REMOVE response: {e} (body: {body:?})"))?;
+            render_remove_response(&response)
+        }
+        Err(crate::mcp::MailboxLifecycleFallback::SocketMissing) => {
+            if !is_root() {
+                exit_socket_missing();
+            }
+            let response = remove_direct(&normalized, force)?;
+            render_remove_response(&response)?;
+            println!(
+                "{} daemon is stopped; restart `aimx serve` so the config change takes effect.",
+                term::warn_mark()
+            );
+            Ok(())
+        }
+        Err(crate::mcp::MailboxLifecycleFallback::Daemon(msg)) => Err(msg.into()),
+    }
+}
+
+/// Daemon-stopped fallback: edit config + wipe storage directly. Only
+/// callable from root; the non-root path exits via
+/// [`exit_socket_missing`].
+fn remove_direct(
+    domain: &str,
+    force: bool,
+) -> Result<crate::domain_handler::DomainRemoveResponse, Box<dyn std::error::Error>> {
+    let config_path = crate::config::config_path();
+    let (config, _warnings) = Config::load_resolved_with_data_dir(None)?;
+    crate::domain_handler::run_direct_remove(&config_path, &config, domain, force)
+}
+
+/// Pretty-print the daemon's `DomainRemoveResponse`. Routes through
+/// `term.rs` semantic helpers (no raw color calls). Exit semantics:
+///
+/// - `BlockedByMailboxes` → non-zero exit (`Err(...)`) so the caller
+///   shell sees a failed `aimx domains remove`. The CLI still prints
+///   the blocker list to stdout for operator inspection.
+/// - `Removed` → success.
+fn render_remove_response(
+    response: &crate::domain_handler::DomainRemoveResponse,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::domain_handler::DomainRemoveOutcome;
+
+    match response.outcome {
+        DomainRemoveOutcome::BlockedByMailboxes => {
+            println!(
+                "{} Domain has {} mailbox(es) — pass {} to cascade-delete them:",
+                term::warn_mark(),
+                response.blocking_mailboxes.len(),
+                term::highlight("--force"),
+            );
+            for (i, fqdn) in response.blocking_mailboxes.iter().enumerate() {
+                println!("  {:>2}. {}", i + 1, term::highlight(fqdn));
+            }
+            println!();
+            println!(
+                "{} DKIM keypair preserved at {}",
+                term::info("info:"),
+                term::highlight(&response.dkim_dir),
+            );
+            // Non-zero exit so scripts can branch on the refusal.
+            Err("refused: domain has mailboxes; rerun with --force to cascade".into())
+        }
+        DomainRemoveOutcome::Removed => {
+            if response.cascaded_mailboxes.is_empty() {
+                println!("{} Removed domain from config.", term::success_mark(),);
+            } else {
+                println!(
+                    "{} Removed domain (cascade) — {} mailbox(es) deleted:",
+                    term::success_mark(),
+                    response.cascaded_mailboxes.len(),
+                );
+                for fqdn in &response.cascaded_mailboxes {
+                    println!("    {} {}", term::dim("-"), term::highlight(fqdn));
+                }
+            }
+            if response.storage_tree_removed {
+                println!("{} Storage tree removed.", term::success_mark());
+            }
+            println!(
+                "{} DKIM keypair preserved at {}",
+                term::info("info:"),
+                term::highlight(&response.dkim_dir),
+            );
+            Ok(())
+        }
+    }
 }
 
 /// Print the canonical hint and exit `EXIT_SOCKET_MISSING`. Mirrors
