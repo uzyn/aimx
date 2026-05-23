@@ -397,6 +397,132 @@ fn find_daemon_pid() -> Option<i32> {
     if pid > 1 { Some(pid) } else { None }
 }
 
+/// Drive the one-shot multi-domain upgrade migration at daemon startup.
+///
+/// Sequence per the migration design contract:
+///
+/// 1. Detect the layout state. `Migrated` → fast no-op (no locks, no log).
+///    `Corrupted` → hard startup error. `FreshInstall` → write marker only,
+///    no log line. `NeedsMigration` → run the four-step transaction under
+///    the documented lock hierarchy.
+/// 2. For `NeedsMigration`: acquire **outer** per-mailbox locks in
+///    **sorted FQDN order** against the shared [`crate::mailbox_locks::MailboxLocks`]
+///    pool that the rest of the daemon will contend on, then the
+///    **inner** process-wide `CONFIG_WRITE_LOCK` for the config write
+///    sequence. Matches the documented cascade-delete ordering and
+///    prevents deadlocks with concurrent CRUD that comes online once
+///    the listener binds.
+/// 3. Run the migration steps (storage → DKIM → config → marker).
+/// 4. Emit a single operator-visible INFO log line summarising every
+///    file/path that moved.
+/// 5. Return the rewritten `Config` so the rest of `run_serve` operates
+///    on the canonical FQDN-keyed shape.
+async fn run_upgrade_migration_at_startup(
+    config: Config,
+    mailbox_locks: Arc<crate::mailbox_locks::MailboxLocks>,
+) -> Result<Config, Box<dyn std::error::Error>> {
+    let data_dir = config.data_dir.clone();
+    let dkim_dir = crate::config::dkim_dir();
+    let config_path = crate::config::config_path();
+
+    // Pre-flight detection only — cheap, no locks.
+    let pre_state = crate::upgrade_migration::detect_layout_state(
+        &data_dir,
+        &dkim_dir,
+        &config_path,
+        config.default_domain(),
+    );
+    match pre_state {
+        crate::upgrade_migration::LayoutState::Migrated => {
+            // Marker present. No locks, no log, no work.
+            return Ok(config);
+        }
+        crate::upgrade_migration::LayoutState::Corrupted(msg) => {
+            return Err(format!(
+                "upgrade migration failed: {msg}; see book/multi-domain.md for manual recovery"
+            )
+            .into());
+        }
+        crate::upgrade_migration::LayoutState::FreshInstall => {
+            crate::upgrade_migration::write_layout_version_marker(&data_dir).map_err(
+                |e| -> Box<dyn std::error::Error> {
+                    format!(
+                        "upgrade migration failed: {e}; \
+                         see book/multi-domain.md for manual recovery"
+                    )
+                    .into()
+                },
+            )?;
+            return Ok(config);
+        }
+        crate::upgrade_migration::LayoutState::NeedsMigration(_) => {
+            // Fall through to the locked migration body.
+        }
+    }
+
+    // Sorted FQDN list — every mailbox's `address` is the canonical FQDN
+    // even when the in-memory map still uses a legacy local-part key.
+    let mut fqdns: Vec<String> = config
+        .mailboxes
+        .values()
+        .map(|mb| mb.address.clone())
+        .collect();
+    fqdns.sort();
+
+    // Outer: per-mailbox locks from the shared pool, acquired in sorted
+    // FQDN order. Held simultaneously across the migration body so any
+    // future concurrent writer cannot interleave.
+    let states: Vec<Arc<crate::mailbox_locks::MailboxState>> = fqdns
+        .iter()
+        .map(|fqdn| mailbox_locks.lock_for(fqdn))
+        .collect();
+    // Acquire all guards in order. Holding references in `held_guards`
+    // keeps every lock taken until this function returns; the
+    // `states` Vec lives for the same scope and outlives the guards,
+    // so the borrows are valid.
+    let mut held_guards: Vec<tokio::sync::MutexGuard<'_, ()>> = Vec::with_capacity(states.len());
+    for state in &states {
+        held_guards.push(state.lock.lock().await);
+    }
+
+    let outcome = {
+        // Inner: process-wide config write lock. Honor the outer →
+        // inner hierarchy even though the migration is the only writer
+        // at startup.
+        let _config_guard = crate::mailbox_handler::CONFIG_WRITE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        crate::upgrade_migration::run_startup_migration(&data_dir, &dkim_dir, &config_path, &config)
+    };
+    // Locks released here as `held_guards` and `states` go out of scope.
+    drop(held_guards);
+    drop(states);
+
+    match outcome {
+        Ok(crate::upgrade_migration::StartupMigrationOutcome::AlreadyMigrated)
+        | Ok(crate::upgrade_migration::StartupMigrationOutcome::Fresh) => {
+            // We re-detected as `NeedsMigration` but the state changed
+            // under us — should be impossible because no other writer
+            // exists yet, but tolerate it defensively rather than
+            // emitting a spurious log line.
+            Ok(config)
+        }
+        Ok(crate::upgrade_migration::StartupMigrationOutcome::Migrated(inner)) => {
+            let crate::upgrade_migration::MigratedOutcome { report, rewritten } = *inner;
+            let line = crate::upgrade_migration::format_migration_log_line(
+                &report,
+                rewritten.default_domain(),
+            );
+            tracing::info!(target: "aimx::upgrade", "{line}");
+            Ok(rewritten)
+        }
+        Err(e) => Err(format!(
+            "upgrade migration failed: {e}; see book/multi-domain.md for manual recovery"
+        )
+        .into()),
+    }
+}
+
 pub fn run(
     bind: Option<&str>,
     tls_cert: Option<&str>,
@@ -448,6 +574,20 @@ async fn run_serve(
     // post-write `chown_as_owner`, the file is still not world-readable.
     crate::ownership::set_process_umask(0o077);
 
+    // A single `MailboxLocks` map is shared across every writer (inbound
+    // ingest, MARK-*, MAILBOX-*) so they all serialize on the same
+    // per-mailbox `tokio::sync::Mutex<()>`. Constructed before the
+    // upgrade migration so the migration can document the
+    // outer-CONFIG_WRITE_LOCK → inner-per-mailbox-lock hierarchy against
+    // the same lock pool the rest of the daemon uses.
+    let mailbox_locks = Arc::new(crate::mailbox_locks::MailboxLocks::new());
+
+    // One-shot multi-domain upgrade migration. Runs before any listener
+    // binds and before the datadir README refresh so the README, when
+    // overwritten, reflects the post-migration layout. Idempotent across
+    // restarts (gated by `<data_dir>/.layout-version`).
+    let config = run_upgrade_migration_at_startup(config, Arc::clone(&mailbox_locks)).await?;
+
     // Refresh the agent-facing README if the baked-in version differs from
     // what is on disk. Runs before any listener is bound so the file is
     // up-to-date by the time agents read it.
@@ -477,7 +617,14 @@ async fn run_serve(
     // Load DKIM key once at startup. Every accepted UDS send reuses this
     // in-memory key. A failure here is fatal: the daemon cannot sign
     // outbound mail without it.
-    let dkim_root = crate::config::dkim_dir();
+    //
+    // After the upgrade migration relocates DKIM keys into
+    // `<dkim_dir>/<default_domain>/`, the resolver below returns the
+    // per-domain path; on a never-migrated fresh install it returns the
+    // legacy `<dkim_dir>` root. The downstream `HashMap<domain, DkimKey>`
+    // refactor replaces this single-key load entirely.
+    let dkim_root_base = crate::config::dkim_dir();
+    let dkim_root = crate::upgrade_migration::resolve_active_dkim_dir(&config, &dkim_root_base);
     let dkim_key = match dkim::load_private_key(&dkim_root) {
         Ok(k) => Arc::new(k),
         Err(e) => {
@@ -540,11 +687,11 @@ async fn run_serve(
         data_dir: data_dir.clone(),
     });
 
-    // A single `MailboxLocks` map is shared across every writer (inbound
-    // ingest, MARK-*, MAILBOX-*) so they all serialize on the same
-    // per-mailbox `tokio::sync::Mutex<()>`. See `crate::mailbox_locks`
-    // for the lock hierarchy.
-    let mailbox_locks = Arc::new(crate::mailbox_locks::MailboxLocks::new());
+    // `mailbox_locks` was constructed earlier (pre-migration) so the
+    // upgrade migration could document the lock hierarchy against the
+    // same shared pool every other writer (inbound ingest, MARK-*,
+    // MAILBOX-*) eventually contends on. See `crate::mailbox_locks` for
+    // the lock hierarchy.
 
     // Shared state context for MARK-READ / MARK-UNREAD verbs and the
     // per-mailbox write lock used by MAILBOX-CREATE / MAILBOX-DELETE

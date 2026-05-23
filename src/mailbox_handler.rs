@@ -316,7 +316,7 @@ fn resolve_owner_ids(owner: &str) -> Result<(u32, u32), String> {
 // verb argument that reintroduces the same `format!` chain at every
 // call site. The spelled-out pattern stays more scannable.
 fn handle_create(
-    state_ctx: &StateContext,
+    _state_ctx: &StateContext,
     mb_ctx: &MailboxContext,
     name: &str,
     owner: &str,
@@ -343,9 +343,12 @@ fn handle_create(
         }
     };
 
-    let data_dir = &state_ctx.data_dir;
-    let inbox = data_dir.join("inbox").join(name);
-    let sent = data_dir.join("sent").join(name);
+    // Route through the layout-aware `Config::inbox_dir` / `sent_dir`
+    // helpers so a post-migration daemon creates the new mailbox tree
+    // under `<data_dir>/<default_domain>/{inbox|sent}/<name>/` instead
+    // of the legacy `<data_dir>/{inbox|sent}/<name>/` location.
+    let inbox = current.inbox_dir(name);
+    let sent = current.sent_dir(name);
 
     // Track whether each dir existed before this call so the rollback
     // branches below never `remove_dir` an operator-created directory.
@@ -493,7 +496,7 @@ fn check_preexisting_dirs(inbox: &Path, sent: &Path, uid: u32, gid: u32) -> Opti
 }
 
 fn handle_delete(
-    state_ctx: &StateContext,
+    _state_ctx: &StateContext,
     mb_ctx: &MailboxContext,
     name: &str,
     force: bool,
@@ -512,11 +515,15 @@ fn handle_delete(
             reason: no_such_mailbox_reason(name),
         };
     }
-    drop(current);
 
-    let data_dir = &state_ctx.data_dir;
-    let inbox = data_dir.join("inbox").join(name);
-    let sent = data_dir.join("sent").join(name);
+    // Route through the layout-aware `Config::inbox_dir` / `sent_dir`
+    // helpers so a post-migration daemon wipes the per-domain tree
+    // (`<data_dir>/<default_domain>/{inbox|sent}/<name>/`) rather than
+    // the legacy `<data_dir>/{inbox|sent}/<name>/` location that the
+    // migration has already moved away from.
+    let inbox = current.inbox_dir(name);
+    let sent = current.sent_dir(name);
+    drop(current);
 
     // `force=true`: wipe inbox + sent contents under the same per-mailbox
     // lock that already guards the stanza removal. This eliminates the

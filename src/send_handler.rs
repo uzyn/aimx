@@ -65,8 +65,11 @@ pub struct SendContext {
     /// Transport used for final MX delivery. In production this is a
     /// `LettreTransport`; tests inject a mock.
     pub transport: Arc<dyn MailTransport + Send + Sync>,
-    /// Data directory root (`/var/lib/aimx` by default). Sent files are
-    /// written to `<data_dir>/sent/<from_mailbox>/`.
+    /// Data directory root (`/var/lib/aimx` by default). Sent files
+    /// route through the layout-aware `Config::sent_dir` helper now,
+    /// but the field is kept on the context for tests and any
+    /// pre-existing callers that still need the raw root.
+    #[allow(dead_code)]
     pub data_dir: PathBuf,
 }
 
@@ -578,7 +581,7 @@ fn extract_bare_address(value: &str) -> Option<String> {
 
 #[allow(clippy::too_many_arguments)]
 fn persist_sent_file(
-    ctx: &SendContext,
+    _ctx: &SendContext,
     config: &Config,
     from_mailbox: &str,
     message_id: &str,
@@ -594,7 +597,11 @@ fn persist_sent_file(
     delivery_details: Option<&str>,
     outbound_format: &str,
 ) -> Option<PathBuf> {
-    let sent_dir = ctx.data_dir.join("sent").join(from_mailbox);
+    // Route through the layout-aware `Config::sent_dir` helper so a
+    // post-migration daemon writes under `<data_dir>/<default_domain>/sent/`
+    // rather than the legacy `<data_dir>/sent/` location that no longer
+    // exists.
+    let sent_dir = config.sent_dir(from_mailbox);
     if let Err(e) = std::fs::create_dir_all(&sent_dir) {
         eprintln!(
             "[send] failed to create sent dir {}: {e}",

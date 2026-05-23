@@ -1454,7 +1454,7 @@ impl Config {
         resolved
     }
 
-    /// Path to a mailbox's inbox directory (`<data_dir>/inbox/<name>/`).
+    /// Path to a mailbox's inbox directory.
     ///
     /// The datadir splits inbound mail into `inbox/` and outbound sent
     /// copies into `sent/`. `mailbox_dir` remains a shorthand for the
@@ -1464,18 +1464,40 @@ impl Config {
         self.inbox_dir(name)
     }
 
-    /// Path to a mailbox's inbox directory (`<data_dir>/inbox/<name>/`).
+    /// Path to a mailbox's inbox directory.
+    ///
+    /// Returns `<data_dir>/<default_domain>/inbox/<name>/` when the
+    /// `.layout-version` marker is present in `data_dir` (v2 per-domain
+    /// layout, post upgrade migration), otherwise the legacy
+    /// `<data_dir>/inbox/<name>/` (single-domain v1 layout, never
+    /// migrated). A future rewire (per-domain mailbox storage helper)
+    /// replaces this branching with a single `mailbox_storage_path`
+    /// that takes the resolved mailbox directly.
     pub fn inbox_dir(&self, name: &str) -> PathBuf {
-        self.data_dir.join("inbox").join(name)
+        let root = self.storage_root_for_default_domain();
+        root.join("inbox").join(name)
     }
 
-    /// Path to a mailbox's sent directory (`<data_dir>/sent/<name>/`).
+    /// Path to a mailbox's sent directory.
     ///
-    /// Sent storage is populated by `aimx serve` on outbound delivery;
-    /// the directory is still created on `mailbox create` so the layout
-    /// is consistent from day one.
+    /// Same v1/v2 layout branching as [`Self::inbox_dir`].
     pub fn sent_dir(&self, name: &str) -> PathBuf {
-        self.data_dir.join("sent").join(name)
+        let root = self.storage_root_for_default_domain();
+        root.join("sent").join(name)
+    }
+
+    /// Resolve the active storage root for mailboxes under the default
+    /// domain. On the v2 (per-domain) layout this is
+    /// `<data_dir>/<default_domain>`; on the v1 (legacy) layout it is
+    /// `<data_dir>` itself. The layout is detected by the presence of
+    /// the `.layout-version` marker file written by the upgrade
+    /// migration.
+    pub fn storage_root_for_default_domain(&self) -> PathBuf {
+        if self.data_dir.join(".layout-version").is_file() {
+            self.data_dir.join(self.default_domain())
+        } else {
+            self.data_dir.clone()
+        }
     }
 }
 
