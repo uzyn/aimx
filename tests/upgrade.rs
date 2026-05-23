@@ -360,17 +360,26 @@ fn upgrade_migrates_v1_fixture_end_to_end() {
             .any(|l| l.trim_start().starts_with("domain =")),
         "legacy `domain = ...` scalar must be gone; got:\n{cfg_after}"
     );
-    // Mailbox keys stay operator-friendly on disk so every downstream
-    // CLI lookup that targets a mailbox by its local-part name keeps
-    // working without a runtime rewrite. The on-disk FQDN re-key is
-    // deferred to the runtime data plane rewire that lands separately.
+    // Mailbox keys are rewritten to the canonical FQDN shape on disk by
+    // the carry-over re-key in `run_mailbox_key_rekey_at_startup`. The
+    // runtime data plane resolves recipients via
+    // `Config::resolve_mailbox_for_rcpt` (against `mb.address`), so the
+    // FQDN-keyed shape lands without breaking any downstream lookup.
     assert!(
-        cfg_after.contains("[mailboxes.info]"),
-        "operator-friendly mailbox key must be preserved on disk; got:\n{cfg_after}"
+        cfg_after.contains("[mailboxes.\"info@fixture.example\"]"),
+        "FQDN mailbox key must land on disk; got:\n{cfg_after}"
     );
     assert!(
-        cfg_after.contains("[mailboxes.support]"),
-        "operator-friendly mailbox key must be preserved on disk; got:\n{cfg_after}"
+        cfg_after.contains("[mailboxes.\"support@fixture.example\"]"),
+        "FQDN mailbox key must land on disk; got:\n{cfg_after}"
+    );
+    assert!(
+        !cfg_after.contains("[mailboxes.info]"),
+        "legacy local-part mailbox key must be gone; got:\n{cfg_after}"
+    );
+    assert!(
+        !cfg_after.contains("[mailboxes.support]"),
+        "legacy local-part mailbox key must be gone; got:\n{cfg_after}"
     );
 
     // Marker present.
@@ -410,6 +419,91 @@ fn upgrade_is_idempotent_on_second_start() {
     assert_eq!(
         marker_after_first, marker_after_second,
         "second start must not rewrite the layout marker",
+    );
+}
+
+#[test]
+fn carry_over_rekey_fires_on_already_migrated_install_with_legacy_mailbox_keys() {
+    // Simulate an install that's already on the v2 layout (storage +
+    // DKIM relocated, `.layout-version: 2` marker present) but where
+    // the mailbox keys on disk are still in their legacy local-part
+    // shape. The multi-domain runtime should rewrite the mailbox keys
+    // to canonical FQDN on the first start under the new binary, then
+    // no-op on every subsequent start.
+    let tmp = TempDir::new().unwrap();
+    install_v1_fixture(tmp.path());
+
+    // Run a manual "earlier-binary" simulation: relocate storage +
+    // DKIM, rewrite the `domain → domains` field, write the marker.
+    // Crucially, leave the mailbox keys in their local-part shape on
+    // disk — the earlier binary's `rewrite_config_to_canonical_shape`
+    // did exactly that.
+    let cfg_path = tmp.path().join("config.toml");
+    let legacy_cfg = fs::read_to_string(&cfg_path).unwrap();
+    // Hand-rewrite `domain = "fixture.example"` to `domains = ["fixture.example"]`
+    // but preserve the `[mailboxes.info]` / `[mailboxes.support]` keys.
+    let domain_rewrite = legacy_cfg.replace(
+        "domain = \"fixture.example\"",
+        "domains = [\"fixture.example\"]",
+    );
+    fs::write(&cfg_path, &domain_rewrite).unwrap();
+    // Relocate storage + DKIM under the per-domain root.
+    let domain_dir = tmp.path().join("fixture.example");
+    fs::create_dir_all(&domain_dir).unwrap();
+    fs::rename(tmp.path().join("inbox"), domain_dir.join("inbox")).unwrap();
+    fs::rename(tmp.path().join("sent"), domain_dir.join("sent")).unwrap();
+    let dkim_dir = tmp.path().join("dkim");
+    let dkim_domain_dir = dkim_dir.join("fixture.example");
+    fs::create_dir_all(&dkim_domain_dir).unwrap();
+    if dkim_dir.join("private.key").is_file() {
+        fs::rename(
+            dkim_dir.join("private.key"),
+            dkim_domain_dir.join("private.key"),
+        )
+        .unwrap();
+    }
+    if dkim_dir.join("public.key").is_file() {
+        fs::rename(
+            dkim_dir.join("public.key"),
+            dkim_domain_dir.join("public.key"),
+        )
+        .unwrap();
+    }
+    // Write the v2 marker so the upgrade migration short-circuits.
+    fs::write(tmp.path().join(".layout-version"), "2\n").unwrap();
+
+    // Confirm the earlier state on disk has legacy mailbox keys.
+    let pre_cfg = fs::read_to_string(&cfg_path).unwrap();
+    assert!(
+        pre_cfg.contains("[mailboxes.info]"),
+        "fixture must carry the earlier shape with legacy local-part keys; got:\n{pre_cfg}"
+    );
+
+    // First start under the multi-domain binary triggers the
+    // mailbox-key FQDN re-key.
+    let port = find_free_port();
+    let child = start_serve(tmp.path(), port);
+    stop_serve(child);
+
+    let after_first = fs::read_to_string(&cfg_path).unwrap();
+    assert!(
+        after_first.contains("[mailboxes.\"info@fixture.example\"]"),
+        "carry-over re-key must move legacy mailbox keys to FQDN; got:\n{after_first}"
+    );
+    assert!(
+        !after_first.contains("[mailboxes.info]"),
+        "legacy local-part mailbox key must be gone; got:\n{after_first}"
+    );
+
+    // Second start is a no-op — already canonical on disk.
+    let port2 = find_free_port();
+    let child2 = start_serve(tmp.path(), port2);
+    stop_serve(child2);
+
+    let after_second = fs::read_to_string(&cfg_path).unwrap();
+    assert_eq!(
+        after_first, after_second,
+        "second start must not rewrite config.toml — the re-key must be idempotent",
     );
 }
 

@@ -453,20 +453,16 @@ fn is_cross_device_error(e: &io::Error) -> bool {
 ///   domain field is gone from the serialized output).
 /// - Per-domain sub-tables (operator-written `[domain."b.com"]`)
 ///   round-trip through the serializer unchanged.
+/// - **Legacy local-part-keyed mailboxes** (`[mailboxes.info]`) are
+///   re-keyed to the canonical FQDN form `[mailboxes."info@<domain>"]`.
+///   The runtime data plane now resolves recipients via
+///   [`crate::config::Config::resolve_mailbox_for_rcpt`], which keys
+///   off `mb.address` (always an FQDN), so the on-disk key shape can
+///   safely move to the canonical FQDN form without breaking
+///   downstream lookups.
 ///
-/// What this step **does not** rewrite on-disk:
-///
-/// - Legacy local-part-keyed mailboxes (`[mailboxes.info]`). The
-///   serializer preserves the operator-friendly key the loader carried
-///   in memory so the runtime data plane and every downstream CLI that
-///   looks up mailboxes by `<local>` (ingest, send, hooks create /
-///   delete, mailboxes show) keeps working unchanged. The on-disk
-///   FQDN re-key (`[mailboxes."<local>@<domain>"]`) is performed later
-///   as part of the runtime data plane rewire that teaches every
-///   callsite to look up mailboxes by FQDN.
-///
-/// The returned `Config` is the input unchanged — the in-memory shape
-/// is preserved across the migration for the same reason.
+/// The returned `Config` carries the FQDN-keyed map so subsequent
+/// `Arc<Config>` swaps don't carry the legacy keys forward.
 ///
 /// Idempotent: when the input `Config` is already in canonical shape
 /// (no legacy `domain` field, all mailboxes already FQDN-keyed), the
@@ -478,11 +474,46 @@ pub fn rewrite_config_to_canonical_shape(
     config_path: &Path,
     in_memory_config: &Config,
 ) -> Result<Config, MigrationError> {
-    write_atomic(config_path, in_memory_config).map_err(|e| MigrationError::Io {
+    let rekeyed = rekey_mailboxes_to_fqdn(in_memory_config);
+    write_atomic(config_path, &rekeyed).map_err(|e| MigrationError::Io {
         path: config_path.to_path_buf(),
         cause: e,
     })?;
-    Ok(in_memory_config.clone())
+    Ok(rekeyed)
+}
+
+/// Return a copy of `config` whose `mailboxes` map is keyed by FQDN —
+/// every legacy local-part-keyed entry is moved to `<local>@<domain>`
+/// using its own `address` field. Already-FQDN-keyed entries pass
+/// through unchanged. The catchall mailbox (`address = "*@<domain>"`)
+/// is keyed by `*@<domain>` in the canonical shape, exactly the same
+/// way operators write it in canonical multi-domain configs.
+pub fn rekey_mailboxes_to_fqdn(config: &Config) -> Config {
+    let mut out = config.clone();
+    let mut rekeyed: std::collections::HashMap<String, crate::config::MailboxConfig> =
+        std::collections::HashMap::with_capacity(out.mailboxes.len());
+    for (key, mb) in out.mailboxes.drain() {
+        let new_key = if key.contains('@') {
+            key
+        } else {
+            mb.address.clone()
+        };
+        rekeyed.insert(new_key, mb);
+    }
+    out.mailboxes = rekeyed;
+    out
+}
+
+/// True when `config_path` carries at least one `[mailboxes.<local>]`
+/// section whose key has no `@`. Cheap regex-style scan of the raw
+/// TOML so the daemon can decide whether to run the deferred on-disk
+/// mailbox-key FQDN re-key without parsing the full document twice.
+pub fn config_has_legacy_mailbox_keys(config_path: &Path) -> bool {
+    let Ok(content) = fs::read_to_string(config_path) else {
+        return false;
+    };
+    let (_, has_local_keys) = inspect_config_for_legacy(&content);
+    has_local_keys
 }
 
 /// Write `<data_dir>/.layout-version` containing `"2\n"`, mode `0644`.
@@ -1194,13 +1225,14 @@ mod tests {
     // --- rewrite_config ----------------------------------------------------
 
     #[test]
-    fn rewrite_config_promotes_legacy_domain_field_but_preserves_mailbox_keys() {
+    fn rewrite_config_promotes_legacy_domain_field_and_rekeys_mailbox_keys_to_fqdn() {
         let tmp = TempDir::new().unwrap();
         let cfg_path = tmp.path().join("config.toml");
         write_legacy_config(&cfg_path, "x.com", &["info", "support"]);
 
         // Load via Config::load to get the same in-memory shape the
-        // daemon would see at startup (legacy local-part keys preserved).
+        // daemon would see at startup (legacy local-part keys preserved
+        // by the loader; the upgrade rewrite owns the FQDN re-key).
         let cfg = Config::load_ignore_warnings(&cfg_path).unwrap();
         assert!(
             cfg.mailboxes.contains_key("info"),
@@ -1209,23 +1241,19 @@ mod tests {
 
         let returned = rewrite_config_to_canonical_shape(&cfg_path, &cfg).unwrap();
 
-        // In-memory shape preserved end-to-end — the migration is
-        // structural, not semantic, and the runtime data plane keeps
-        // looking up mailboxes by their operator-friendly key.
-        assert!(returned.mailboxes.contains_key("info"));
-        assert!(returned.mailboxes.contains_key("support"));
+        // Returned in-memory shape carries the FQDN-keyed map so
+        // subsequent Arc<Config> swaps don't carry legacy keys forward.
+        assert!(returned.mailboxes.contains_key("info@x.com"));
+        assert!(returned.mailboxes.contains_key("support@x.com"));
+        assert!(!returned.mailboxes.contains_key("info"));
+        assert!(!returned.mailboxes.contains_key("support"));
 
         // On disk: `domains = [...]` replaces the legacy `domain = "..."`
-        // field, but mailbox keys keep their operator-friendly form so
-        // downstream CLI lookups (`hooks create alice`, `mailboxes show`)
-        // continue to resolve.
+        // field, and mailbox keys move to the canonical FQDN shape.
         let reloaded = Config::load_ignore_warnings(&cfg_path).unwrap();
         assert_eq!(reloaded.domains, vec!["x.com"]);
-        assert!(
-            reloaded.mailboxes.contains_key("info"),
-            "operator-friendly local-part keys preserved on disk"
-        );
-        assert!(reloaded.mailboxes.contains_key("support"));
+        assert!(reloaded.mailboxes.contains_key("info@x.com"));
+        assert!(reloaded.mailboxes.contains_key("support@x.com"));
 
         // Serialized file body no longer carries the legacy scalar.
         let serialized = fs::read_to_string(&cfg_path).unwrap();
@@ -1349,10 +1377,11 @@ mod tests {
                 let MigratedOutcome { report, rewritten } = *inner;
                 assert!(report.config_rewritten);
                 assert!(report.marker_written);
-                // The returned Config preserves the in-memory shape end-
-                // to-end (legacy local-part keys) so the runtime data
-                // plane keeps working in this session.
-                assert!(rewritten.mailboxes.contains_key("info"));
+                // The returned Config carries the FQDN-keyed map so the
+                // runtime data plane (which now resolves recipients via
+                // `Config::resolve_mailbox_for_rcpt`) operates on the
+                // canonical shape immediately after the migration.
+                assert!(rewritten.mailboxes.contains_key("info@x.com"));
                 let line = format_migration_log_line(&report, rewritten.default_domain());
                 assert!(line.contains("default_domain=x.com"));
                 assert!(line.contains("layout_version=2"));
@@ -1360,12 +1389,11 @@ mod tests {
             }
             other => panic!("expected Migrated outcome, got {other:?}"),
         }
-        // On-disk shape: `domains = [...]` replaces the legacy scalar,
-        // but mailbox keys keep their operator-friendly local-part
-        // form (the FQDN re-key is deferred to the runtime rewire).
+        // On-disk shape: `domains = [...]` replaces the legacy scalar
+        // and mailbox keys move to the canonical FQDN form.
         let reloaded = Config::load_ignore_warnings(&cfg_path).unwrap();
         assert_eq!(reloaded.domains, vec!["x.com"]);
-        assert!(reloaded.mailboxes.contains_key("info"));
+        assert!(reloaded.mailboxes.contains_key("info@x.com"));
 
         // Idempotent: second call sees the marker.
         let cfg2 = Config::load_ignore_warnings(&cfg_path).unwrap();
@@ -1432,16 +1460,15 @@ mod tests {
         // DKIM relocated.
         assert!(dkim_dir.join("x.com").join("private.key").is_file());
         assert!(!dkim_dir.join("private.key").is_file());
-        // In-memory shape preserved end-to-end (legacy local-part keys
-        // round-trip through the rewrite); the on-disk shape promotes
-        // `domain` → `domains` but keeps the operator-friendly mailbox
-        // keys for downstream CLI compatibility.
-        assert!(returned.mailboxes.contains_key("info"));
-        assert!(returned.mailboxes.contains_key("support"));
+        // Mailbox-key FQDN re-key: the in-memory shape returned by the
+        // migration is FQDN-keyed so the daemon's `Arc<Config>` snapshot
+        // matches the canonical disk shape from the first request on.
+        assert!(returned.mailboxes.contains_key("info@x.com"));
+        assert!(returned.mailboxes.contains_key("support@x.com"));
         let reloaded = Config::load_ignore_warnings(&cfg_path).unwrap();
         assert_eq!(reloaded.domains, vec!["x.com"]);
-        assert!(reloaded.mailboxes.contains_key("info"));
-        assert!(reloaded.mailboxes.contains_key("support"));
+        assert!(reloaded.mailboxes.contains_key("info@x.com"));
+        assert!(reloaded.mailboxes.contains_key("support@x.com"));
         // Marker present.
         assert_eq!(
             fs::read_to_string(data_dir.join(LAYOUT_MARKER_FILENAME)).unwrap(),

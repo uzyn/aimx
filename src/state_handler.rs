@@ -139,14 +139,15 @@ pub async fn handle_mark(ctx: &StateContext, req: &MarkRequest, caller: &Caller)
     // We return `ENOENT` (not `EACCES`) when the mailbox
     // is absent so the authz check itself cannot leak which mailboxes
     // exist. Once the mailbox resolves, the ownership check runs.
+    //
+    // Multi-domain: route through `Config::resolve_mailbox_by_name` so
+    // callers can pass the operator-friendly local-part (`"alice"`) on
+    // single-domain installs as well as the canonical FQDN
+    // (`"alice@a.com"`) on multi-domain installs. The resolver returns
+    // the canonical key the in-memory map uses.
     let config_snapshot = ctx.config_handle.load();
-    // `contains_key` + `get` is split to keep the existence check out
-    // of the authz error path, but the `get` must succeed on the
-    // snapshot we just checked. We match explicitly on `None` and
-    // return `ENOENT` so authz can never be silently skipped if a
-    // future refactor drops the `contains_key` pre-check.
-    let mailbox_cfg = match config_snapshot.mailboxes.get(&req.mailbox) {
-        Some(m) => m.clone(),
+    let (resolved_name, mailbox_cfg) = match config_snapshot.resolve_mailbox_by_name(&req.mailbox) {
+        Some((k, m)) => (k.to_string(), m.clone()),
         None => {
             return AckResponse::Err {
                 code: ErrCode::Enoent,
@@ -155,17 +156,17 @@ pub async fn handle_mark(ctx: &StateContext, req: &MarkRequest, caller: &Caller)
         }
     };
     let verb = if req.read { "MARK-READ" } else { "MARK-UNREAD" };
-    if let Err(reject) = enforce_mailbox_owner_or_root(verb, caller, &req.mailbox, &mailbox_cfg) {
+    if let Err(reject) = enforce_mailbox_owner_or_root(verb, caller, &resolved_name, &mailbox_cfg) {
         return AckResponse::Err {
             code: reject.code,
             reason: reject.reason,
         };
     }
 
-    let state = ctx.lock_for(&req.mailbox);
+    let state = ctx.lock_for(&resolved_name);
     let _guard = state.lock.lock().await;
 
-    let mailbox_dir = inbox_dir(&config_snapshot, &req.mailbox);
+    let mailbox_dir = inbox_dir(&config_snapshot, &resolved_name);
     let filepath = match resolve_email_path_strict(&mailbox_dir, &req.id) {
         Some(p) => p,
         None => {

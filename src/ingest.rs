@@ -66,24 +66,41 @@ const DEDUP_MAX_VALUE_SIZE: usize = 256;
 
 /// Decide whether a recipient address routes to a configured mailbox.
 ///
-/// Returns `Some(mailbox_name)` when either a concrete mailbox matches
-/// the local part or a catchall (`*@<domain>`) exists; `None` when no
-/// mailbox can accept the recipient. Called from both the SMTP
-/// `handle_rcpt_to` preflight (so unknown recipients are rejected at
-/// RCPT time with `550 5.1.1`) and from `ingest_email` itself (so the
-/// RCPT-time decision and the DATA-time decision never drift).
+/// Returns `Some(mailbox_name)` (the operator-friendly key the in-memory
+/// map uses) when either a concrete mailbox matches the FQDN or a
+/// per-domain catchall (`*@<domain>`) exists; `None` when no mailbox can
+/// accept the recipient. Called from both the SMTP `handle_rcpt_to`
+/// preflight (so unknown recipients are rejected at RCPT time with
+/// `550 5.1.1`) and from `ingest_email` itself (so the RCPT-time decision
+/// and the DATA-time decision never drift).
 ///
-/// The caller is responsible for checking that the domain matches
-/// `config.domain`; this helper is agnostic about the recipient's
-/// domain and only looks at the local part against the configured
-/// mailboxes.
+/// The recipient is matched against `mb.address` (FQDN), so a config
+/// with both legacy local-part-keyed mailboxes and canonical
+/// FQDN-keyed mailboxes resolves uniformly. The caller is responsible
+/// for first checking that the domain is in [`Config::domains`] (the
+/// SMTP RCPT TO handler does this before invoking this helper).
 pub fn resolve_recipient_mailbox(config: &Config, rcpt: &str) -> Option<String> {
-    let local_part = extract_local_part(rcpt);
-    if config.mailboxes.contains_key(local_part) {
-        return Some(local_part.to_string());
+    if let Some((name, _mb)) = config.resolve_mailbox_for_rcpt(rcpt) {
+        return Some(name.to_string());
     }
-    if config.mailboxes.contains_key("catchall") {
-        return Some("catchall".to_string());
+    // Legacy `[mailboxes.catchall]` key with `address = "*@<default>"`
+    // is already picked up by `resolve_mailbox_for_rcpt` (the catchall
+    // address ends in `@<default_domain>` so the per-domain fallback
+    // finds it). The legacy bare local-part fallback below covers
+    // single-domain v1 installs where the operator's mailbox map is
+    // local-part-keyed but the RCPT domain still matches; the resolver
+    // walk above already handles those by comparing `mb.address`
+    // case-insensitively against the FQDN, so this fallback only fires
+    // for callers passing a bare local-part `rcpt` (manual stdin ingest
+    // via `aimx ingest`).
+    if !rcpt.contains('@') {
+        let local_part = extract_local_part(rcpt);
+        if config.mailboxes.contains_key(local_part) {
+            return Some(local_part.to_string());
+        }
+        if config.mailboxes.contains_key("catchall") {
+            return Some("catchall".to_string());
+        }
     }
     None
 }

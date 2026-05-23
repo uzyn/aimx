@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 use crate::config::{Config, ConfigHandle, MailboxConfig};
 use crate::dkim;
+use crate::dkim_keys::SharedDkimKeyMap;
 use crate::frontmatter::{
     DeliveryStatus, OutboundFrontmatter, compute_thread_id, format_outbound_frontmatter,
 };
@@ -26,6 +27,7 @@ use crate::hook::{self, AfterSendContext, SendStatus};
 use crate::ownership::chown_as_owner;
 use crate::send_protocol::{ErrCode, SendRequest, SendResponse};
 use crate::slug::{allocate_filename, slugify};
+use crate::storage::{Folder, mailbox_storage_path};
 use crate::transport::{MailTransport, TransportError};
 use crate::uds_authz::{Caller, enforce_mailbox_owner_or_root};
 
@@ -55,10 +57,12 @@ pub struct RegisteredMailbox {
 /// `config_handle` so a `MAILBOX-CREATE` over UDS is immediately visible
 /// to subsequent `SEND` requests without a restart.
 pub struct SendContext {
-    /// DKIM private key, loaded once at `aimx serve` startup.
-    pub dkim_key: Arc<RsaPrivateKey>,
-    /// DKIM selector (`<selector>._domainkey.<domain>`).
-    pub dkim_selector: String,
+    /// Per-domain DKIM key map (key + resolved selector per configured
+    /// domain), atomically swappable so future DOMAIN-ADD / DOMAIN-REMOVE
+    /// verbs can hot-swap an entry without restarting the daemon. Each
+    /// per-message signer looks up the From: domain's [`crate::dkim_keys::DkimKeyEntry`]
+    /// before signing.
+    pub dkim_keys: SharedDkimKeyMap,
     /// Live handle to the daemon's `Config`. Read briefly at the top of
     /// `handle_send` to capture the snapshot used for this request.
     pub config_handle: ConfigHandle,
@@ -66,7 +70,7 @@ pub struct SendContext {
     /// `LettreTransport`; tests inject a mock.
     pub transport: Arc<dyn MailTransport + Send + Sync>,
     /// Data directory root (`/var/lib/aimx` by default). Sent files
-    /// route through the layout-aware `Config::sent_dir` helper now,
+    /// route through [`crate::storage::mailbox_storage_path`] now,
     /// but the field is kept on the context for tests and any
     /// pre-existing callers that still need the raw root.
     #[allow(dead_code)]
@@ -99,7 +103,7 @@ where
     // MAILBOX-CREATE/DELETE that lands after this point still runs; the
     // swap just doesn't affect the decision for *this* particular send.
     let config = ctx.config_handle.load();
-    let primary_domain = config.default_domain();
+    let default_domain = config.default_domain().to_string();
     let mailboxes = config.mailboxes.iter().map(|(name, mb)| {
         (
             name.clone(),
@@ -123,7 +127,7 @@ where
         ],
     );
 
-    let from_header = match headers.get("From") {
+    let raw_from_header = match headers.get("From") {
         Some(v) => v.clone(),
         None => {
             return SendResponse::Err {
@@ -133,14 +137,35 @@ where
         }
     };
 
+    // Bare-local-part rewrite: the CLI is allowed to pass `--from research`
+    // (no `@`) to mean "use the operator's default sending identity". The
+    // daemon detects the absence of `@` in the From: header's bare address
+    // and rewrites to `<local>@<domains[0]>` before validation and signing.
+    // FQDN form passes through unchanged.
+    let (from_header, body_with_rewritten_from) = match rewrite_bare_from_to_default_domain(
+        &req.body,
+        &raw_from_header,
+        &default_domain,
+    ) {
+        Some((new_header, new_body)) => {
+            tracing::debug!(
+                target: "aimx::send",
+                "bare-local-part From: rewritten to default domain default_domain={default_domain} original={raw_from_header} rewritten={new_header}",
+            );
+            (new_header, new_body)
+        }
+        None => (raw_from_header.clone(), req.body.clone()),
+    };
+
     // The daemon resolves the sender mailbox from the submitted `From:`
     // itself. The client does not send `From-Mailbox:` and does not read
     // `/etc/aimx/config.toml`.
     //
-    // The sender domain must equal the configured primary domain
-    // (case-insensitive) AND the local part must resolve to an explicitly
-    // configured non-wildcard mailbox. Catchall (`*@domain`) is
-    // inbound-routing only and never accepted as an outbound sender.
+    // The sender domain must appear in `config.domains` (case-insensitive)
+    // AND the local part must resolve to an explicitly configured
+    // non-wildcard mailbox under that domain. Catchall (`*@domain`) is
+    // inbound-routing only and never accepted as an outbound sender on
+    // any domain.
 
     let bare_from = match extract_bare_address(&from_header) {
         Some(addr) => addr,
@@ -162,14 +187,16 @@ where
         }
     };
 
-    if !sender_domain.eq_ignore_ascii_case(primary_domain) {
+    if !config.is_configured_domain(&sender_domain) {
         return SendResponse::Err {
             code: ErrCode::Domain,
             reason: format!(
-                "sender domain '{sender_domain}' does not match aimx domain '{primary_domain}'"
+                "sender domain '{sender_domain}' is not in `domains = {:?}`",
+                config.domains
             ),
         };
     }
+    let sender_domain_lc = sender_domain.to_ascii_lowercase();
 
     let from_mailbox = match resolve_concrete_mailbox(&mailboxes, &bare_from) {
         Some(name) => name,
@@ -242,13 +269,13 @@ where
     // If Message-ID is absent we synthesize one ourselves rather than
     // erroring out: Message-ID is not a required client header, and
     // `AIMX/1 OK <message-id>` still needs something to echo. Using the
-    // configured primary domain matches the DKIM `d=` tag and avoids
-    // leaking a recipient-side hostname.
+    // sender's domain matches the DKIM `d=` tag and avoids leaking a
+    // recipient-side hostname.
     let (message_id, body_with_id) = match headers.get("Message-ID") {
-        Some(v) => (v.clone(), req.body.clone()),
+        Some(v) => (v.clone(), body_with_rewritten_from.clone()),
         None => {
-            let synthetic = format!("<{}@{}>", Uuid::new_v4(), primary_domain);
-            let injected = inject_message_id_header(&req.body, &synthetic);
+            let synthetic = format!("<{}@{}>", Uuid::new_v4(), sender_domain_lc);
+            let injected = inject_message_id_header(&body_with_rewritten_from, &synthetic);
             (synthetic, injected)
         }
     };
@@ -291,11 +318,27 @@ where
         }
     };
 
+    // Per-domain DKIM signing. The signing key + selector are pulled
+    // from the live map for the From: domain so a multi-domain install
+    // signs each outbound with the right `d=` tag and per-domain key.
+    let dkim_map = ctx.dkim_keys.load_full();
+    let dkim_entry = match crate::dkim_keys::entry_for_domain(&dkim_map, &sender_domain_lc) {
+        Some(e) => e.clone(),
+        None => {
+            return SendResponse::Err {
+                code: ErrCode::Sign,
+                reason: format!(
+                    "no DKIM key loaded for domain '{sender_domain_lc}'; \
+                     run `aimx dkim-keygen --domain {sender_domain_lc}` and restart aimx serve"
+                ),
+            };
+        }
+    };
     let signed = match signer(
         &body_bytes,
-        &ctx.dkim_key,
-        primary_domain,
-        &ctx.dkim_selector,
+        &dkim_entry.key,
+        &sender_domain_lc,
+        &dkim_entry.selector,
     ) {
         Ok(bytes) => bytes,
         Err(e) => {
@@ -555,6 +598,180 @@ fn extract_domain(from: &str) -> Option<String> {
     Some(addr[at + 1..].trim().to_string())
 }
 
+/// If the From: header's bare address has no `@`, rewrite the bare
+/// local-part to `<local>@<default_domain>` and return the new
+/// `(header_value, body)` pair. Returns `None` when the From: already
+/// carries an FQDN (the common case on a daemon-mediated send from
+/// `aimx send --from <local>@<domain>` or a CLI that composed an FQDN
+/// itself).
+///
+/// The rewrite touches both the **header value** the daemon reads via
+/// `headers.get("From")` and the **body bytes** that get DKIM-signed.
+/// The DKIM signature covers `From:` so the body must be rewritten too;
+/// otherwise the receiver verifies the signature against a bare
+/// local-part and DMARC alignment fails.
+fn rewrite_bare_from_to_default_domain(
+    body: &[u8],
+    raw_from_header: &str,
+    default_domain: &str,
+) -> Option<(String, Vec<u8>)> {
+    let bare = extract_bare_local_only(raw_from_header)?;
+    let fqdn = format!("{bare}@{default_domain}");
+    let new_header = if raw_from_header.contains('<') {
+        // Replace `<local>` (no `@`) with `<local@domain>`. Display name
+        // before the angle bracket survives verbatim.
+        let mut out = String::with_capacity(raw_from_header.len() + fqdn.len());
+        let start = raw_from_header.find('<')?;
+        let end = raw_from_header[start..].find('>')?;
+        out.push_str(&raw_from_header[..start]);
+        out.push('<');
+        out.push_str(&fqdn);
+        out.push('>');
+        out.push_str(&raw_from_header[start + end + 1..]);
+        out
+    } else {
+        // Bare token — replace the whole header value.
+        fqdn.clone()
+    };
+    let new_body = rewrite_from_header_in_body(body, &new_header)?;
+    Some((new_header, new_body))
+}
+
+/// Like [`extract_bare_address`] but only returns Some when the
+/// extracted token is a bare local-part with no `@`. Used by the
+/// rewrite path to decide whether the From: needs daemon-side
+/// completion.
+fn extract_bare_local_only(value: &str) -> Option<String> {
+    let first = value.split(',').next().unwrap_or(value).trim();
+    if first.is_empty() {
+        return None;
+    }
+    let token = if let Some(start) = first.rfind('<') {
+        let tail = &first[start + 1..];
+        let end = tail.find('>').unwrap_or(tail.len());
+        tail[..end].trim()
+    } else {
+        first
+    };
+    if token.is_empty() || token.contains('@') {
+        return None;
+    }
+    Some(token.to_string())
+}
+
+/// Replace the first `From:` header in the body with `new_value`.
+/// Preserves the body's existing line endings. Returns `None` when the
+/// header block has no recognisable `From:` line.
+///
+/// The search is restricted to the header block (everything before the
+/// first blank line) so a `From:` literal in quoted / forwarded body
+/// text cannot be mistaken for the real header. Header folding (RFC
+/// 5322 §2.2.3 — continuation lines starting with whitespace) is
+/// handled: the whole logical header, including any folded continuation
+/// lines, is replaced as a unit.
+fn rewrite_from_header_in_body(body: &[u8], new_value: &str) -> Option<Vec<u8>> {
+    // Validate UTF-8 once; the rest of the search operates on bytes
+    // so we can keep slice arithmetic exact.
+    std::str::from_utf8(body).ok()?;
+    let bytes = body;
+
+    // Walk header lines from byte 0. A header line ends at the next
+    // `\n`. A blank line (zero-width or just `\r`) terminates the
+    // header block — anything from that point on is body text and
+    // must NOT match. Continuation lines (start with SP / HT) bind to
+    // the previous logical header.
+    let mut from_start: Option<usize> = None;
+    let mut from_after: Option<usize> = None; // index of the `\n` that ends the logical header
+    let mut crlf_terminator = false;
+
+    let mut pos = 0;
+    while pos < bytes.len() {
+        let line_end = match bytes[pos..].iter().position(|b| *b == b'\n') {
+            Some(n) => pos + n,
+            None => bytes.len(),
+        };
+        let has_cr = line_end > pos && bytes[line_end - 1] == b'\r';
+        let content_end = if has_cr { line_end - 1 } else { line_end };
+        let line_bytes = &bytes[pos..content_end];
+
+        // Blank line → end of header block. Stop searching.
+        if line_bytes.is_empty() {
+            break;
+        }
+
+        // Continuation line (folded header): not eligible as a `From:`
+        // start; the outer header line carries the name.
+        let is_continuation = line_bytes[0] == b' ' || line_bytes[0] == b'\t';
+        if is_continuation {
+            pos = if line_end < bytes.len() {
+                line_end + 1
+            } else {
+                line_end
+            };
+            continue;
+        }
+
+        let starts_with_from = line_bytes.len() >= 5
+            && line_bytes[0].eq_ignore_ascii_case(&b'f')
+            && line_bytes[1].eq_ignore_ascii_case(&b'r')
+            && line_bytes[2].eq_ignore_ascii_case(&b'o')
+            && line_bytes[3].eq_ignore_ascii_case(&b'm')
+            && line_bytes[4] == b':';
+        if starts_with_from && from_start.is_none() {
+            from_start = Some(pos);
+            // Absorb any continuation lines into the logical header.
+            let mut log_line_end = line_end;
+            let mut log_has_cr = has_cr;
+            let mut cursor = if line_end < bytes.len() {
+                line_end + 1
+            } else {
+                line_end
+            };
+            while cursor < bytes.len() {
+                let first = bytes[cursor];
+                if first != b' ' && first != b'\t' {
+                    break;
+                }
+                let next_end = match bytes[cursor..].iter().position(|b| *b == b'\n') {
+                    Some(n) => cursor + n,
+                    None => bytes.len(),
+                };
+                let next_has_cr = next_end > cursor && bytes[next_end - 1] == b'\r';
+                log_line_end = next_end;
+                log_has_cr = next_has_cr;
+                cursor = if next_end < bytes.len() {
+                    next_end + 1
+                } else {
+                    next_end
+                };
+            }
+            from_after = Some(log_line_end);
+            crlf_terminator = log_has_cr;
+            break;
+        }
+
+        pos = if line_end < bytes.len() {
+            line_end + 1
+        } else {
+            line_end
+        };
+    }
+
+    let start = from_start?;
+    let after = from_after?;
+
+    // Rebuild: <bytes before From:> + "From: <new_value>" [+ CR] + <rest>.
+    // When the original header ran to EOF with no `\n`, `after` ==
+    // `bytes.len()` and the slice append is empty; the rewritten
+    // header inherits the same no-terminator shape.
+    let trailing = if crlf_terminator { "\r" } else { "" };
+    let mut new_body = Vec::with_capacity(body.len());
+    new_body.extend_from_slice(&body[..start]);
+    new_body.extend_from_slice(format!("From: {new_value}{trailing}").as_bytes());
+    new_body.extend_from_slice(&body[after..]);
+    Some(new_body)
+}
+
 /// Extract the bare `local@host` form from a header value, accepting
 /// `"Name" <local@host>`, `local@host`, and angle-only `<local@host>`. For
 /// comma-separated header values only the first recipient is returned;
@@ -597,11 +814,15 @@ fn persist_sent_file(
     delivery_details: Option<&str>,
     outbound_format: &str,
 ) -> Option<PathBuf> {
-    // Route through the layout-aware `Config::sent_dir` helper so a
-    // post-migration daemon writes under `<data_dir>/<default_domain>/sent/`
-    // rather than the legacy `<data_dir>/sent/` location that no longer
-    // exists.
-    let sent_dir = config.sent_dir(from_mailbox);
+    // Route through the canonical `mailbox_storage_path` helper so a
+    // multi-domain daemon writes under `<data_dir>/<from-domain>/sent/<local>/`
+    // (per-message domain) rather than the default-domain shape that
+    // the layout-aware shim assumed.
+    let mailbox_cfg = config.mailboxes.get(from_mailbox);
+    let sent_dir = match mailbox_cfg {
+        Some(mb) => mailbox_storage_path(config, mb, Folder::Sent),
+        None => config.sent_dir(from_mailbox),
+    };
     if let Err(e) = std::fs::create_dir_all(&sent_dir) {
         eprintln!(
             "[send] failed to create sent dir {}: {e}",
@@ -613,7 +834,6 @@ fn persist_sent_file(
     // drift otherwise). The mailbox lookup can only miss in exotic
     // cases because `from_mailbox` was resolved from `config.mailboxes`
     // earlier in the request.
-    let mailbox_cfg = config.mailboxes.get(from_mailbox);
     if let Some(mb_cfg) = mailbox_cfg
         && let Err(e) = chown_as_owner(&sent_dir, mb_cfg, 0o700)
     {
@@ -787,6 +1007,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         dkim::generate_keypair(tmp.path(), false).unwrap();
         let key = dkim::load_private_key(tmp.path()).unwrap();
+        let dkim_keys = build_test_dkim_map("example.com", "aimx", &key);
         let dir = data_dir.unwrap_or_else(|| tmp.path().to_path_buf());
         let mut mailboxes = std::collections::HashMap::new();
         mailboxes.insert(
@@ -826,12 +1047,30 @@ mod tests {
         };
         let config_handle = ConfigHandle::new(config);
         SendContext {
-            dkim_key: Arc::new(key),
-            dkim_selector: "aimx".to_string(),
+            dkim_keys,
             config_handle,
             transport,
             data_dir: dir,
         }
+    }
+
+    /// Build a single-domain `SharedDkimKeyMap` for unit tests. Mirrors
+    /// the real loader without going through the filesystem.
+    fn build_test_dkim_map(
+        domain: &str,
+        selector: &str,
+        key: &rsa::RsaPrivateKey,
+    ) -> crate::dkim_keys::SharedDkimKeyMap {
+        use std::collections::HashMap;
+        let mut map: HashMap<String, crate::dkim_keys::DkimKeyEntry> = HashMap::new();
+        map.insert(
+            domain.to_string(),
+            crate::dkim_keys::DkimKeyEntry {
+                key: Arc::new(key.clone()),
+                selector: selector.to_string(),
+            },
+        );
+        Arc::new(arc_swap::ArcSwap::from_pointee(map))
     }
 
     fn body(from: &str) -> Vec<u8> {
@@ -1445,9 +1684,9 @@ mod tests {
             signature: None,
             upgrade: None,
         };
+        let dkim_keys = build_test_dkim_map("example.com", "aimx", &key);
         let ctx = SendContext {
-            dkim_key: Arc::new(key),
-            dkim_selector: "aimx".into(),
+            dkim_keys,
             config_handle: ConfigHandle::new(config),
             transport: mock,
             data_dir: data_dir.path().to_path_buf(),
@@ -1510,9 +1749,9 @@ mod tests {
             signature,
             upgrade: None,
         };
+        let dkim_keys = build_test_dkim_map("example.com", "aimx", &key);
         SendContext {
-            dkim_key: Arc::new(key),
-            dkim_selector: "aimx".to_string(),
+            dkim_keys,
             config_handle: ConfigHandle::new(config),
             transport,
             data_dir,
@@ -1949,5 +2188,386 @@ mod tests {
                 sent_dir.display()
             );
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Multi-domain send tests
+    // ------------------------------------------------------------------
+
+    /// Build a two-domain SendContext keyed by per-message domain.
+    fn two_domain_send_ctx(
+        transport: Arc<dyn MailTransport + Send + Sync>,
+        data_dir: std::path::PathBuf,
+    ) -> SendContext {
+        use tempfile::TempDir;
+        // Distinct DKIM keys per domain so the test can assert on `d=`.
+        let key_dir_a = TempDir::new().unwrap();
+        dkim::generate_keypair(key_dir_a.path(), false).unwrap();
+        let key_a = dkim::load_private_key(key_dir_a.path()).unwrap();
+
+        let key_dir_b = TempDir::new().unwrap();
+        dkim::generate_keypair(key_dir_b.path(), false).unwrap();
+        let key_b = dkim::load_private_key(key_dir_b.path()).unwrap();
+
+        let mut map: std::collections::HashMap<String, crate::dkim_keys::DkimKeyEntry> =
+            std::collections::HashMap::new();
+        map.insert(
+            "a.com".to_string(),
+            crate::dkim_keys::DkimKeyEntry {
+                key: Arc::new(key_a),
+                selector: "aimx".to_string(),
+            },
+        );
+        map.insert(
+            "b.com".to_string(),
+            crate::dkim_keys::DkimKeyEntry {
+                key: Arc::new(key_b),
+                selector: "s2025".to_string(),
+            },
+        );
+        let dkim_keys: crate::dkim_keys::SharedDkimKeyMap =
+            Arc::new(arc_swap::ArcSwap::from_pointee(map));
+
+        let mut mailboxes = std::collections::HashMap::new();
+        mailboxes.insert(
+            "info@a.com".to_string(),
+            crate::config::MailboxConfig {
+                address: "info@a.com".to_string(),
+                owner: "root".to_string(),
+                hooks: vec![],
+                trust: None,
+                trusted_senders: None,
+                allow_root_catchall: false,
+            },
+        );
+        mailboxes.insert(
+            "support@b.com".to_string(),
+            crate::config::MailboxConfig {
+                address: "support@b.com".to_string(),
+                owner: "root".to_string(),
+                hooks: vec![],
+                trust: None,
+                trusted_senders: None,
+                allow_root_catchall: false,
+            },
+        );
+        mailboxes.insert(
+            "*@b.com".to_string(),
+            crate::config::MailboxConfig {
+                address: "*@b.com".to_string(),
+                owner: "aimx-catchall".to_string(),
+                hooks: vec![],
+                trust: None,
+                trusted_senders: None,
+                allow_root_catchall: false,
+            },
+        );
+        let config = crate::config::Config {
+            domains: vec!["a.com".to_string(), "b.com".to_string()],
+            data_dir: data_dir.clone(),
+            dkim_selector: Some("aimx".to_string()),
+            trust: "none".to_string(),
+            trusted_senders: vec![],
+            mailboxes,
+            per_domain: std::collections::HashMap::new(),
+            verify_host: None,
+            enable_ipv6: false,
+            signature: None,
+            upgrade: None,
+        };
+        SendContext {
+            dkim_keys,
+            config_handle: ConfigHandle::new(config),
+            transport,
+            data_dir,
+        }
+    }
+
+    #[tokio::test]
+    async fn two_domain_send_from_a_signs_with_a_dkim_key() {
+        let data_dir = tempfile::TempDir::new().unwrap();
+        let mock = Arc::new(MockTransport {
+            captured: Mutex::new(vec![]),
+            behavior: Behavior::Ok,
+        });
+        let ctx = two_domain_send_ctx(mock.clone(), data_dir.path().to_path_buf());
+        let req = SendRequest {
+            body: body("info@a.com"),
+            ..Default::default()
+        };
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
+        assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
+
+        let captured = mock.captured.lock().unwrap();
+        let delivered = String::from_utf8_lossy(&captured[0]);
+        assert!(
+            delivered.contains("d=a.com"),
+            "DKIM d= tag must match From: domain a.com; got: {delivered}"
+        );
+        assert!(
+            delivered.contains("s=aimx"),
+            "DKIM selector must match a.com's selector; got: {delivered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_domain_send_from_b_signs_with_b_dkim_key_and_selector() {
+        let data_dir = tempfile::TempDir::new().unwrap();
+        let mock = Arc::new(MockTransport {
+            captured: Mutex::new(vec![]),
+            behavior: Behavior::Ok,
+        });
+        let ctx = two_domain_send_ctx(mock.clone(), data_dir.path().to_path_buf());
+        let req = SendRequest {
+            body: body("support@b.com"),
+            ..Default::default()
+        };
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
+        assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
+
+        let captured = mock.captured.lock().unwrap();
+        let delivered = String::from_utf8_lossy(&captured[0]);
+        assert!(
+            delivered.contains("d=b.com"),
+            "DKIM d= tag must match From: domain b.com; got: {delivered}"
+        );
+        assert!(
+            delivered.contains("s=s2025"),
+            "per-domain selector override must be applied for b.com; got: {delivered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_domain_send_persists_sent_under_per_domain_path() {
+        let data_dir = tempfile::TempDir::new().unwrap();
+        // Force v2 layout so the per-domain path resolver kicks in.
+        std::fs::write(data_dir.path().join(".layout-version"), "2\n").unwrap();
+        let mock = Arc::new(MockTransport {
+            captured: Mutex::new(vec![]),
+            behavior: Behavior::Ok,
+        });
+        let ctx = two_domain_send_ctx(mock.clone(), data_dir.path().to_path_buf());
+        let req = SendRequest {
+            body: body("support@b.com"),
+            ..Default::default()
+        };
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
+        assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
+
+        // Sent copy lands under <data_dir>/b.com/sent/support/
+        let sent_dir = data_dir.path().join("b.com").join("sent").join("support");
+        assert!(
+            sent_dir.exists(),
+            "per-domain sent dir must exist: {}",
+            sent_dir.display()
+        );
+        let entries: Vec<_> = std::fs::read_dir(&sent_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert_eq!(entries.len(), 1, "one sent file under b.com/sent/support");
+    }
+
+    #[tokio::test]
+    async fn send_from_unconfigured_domain_returns_domain_error() {
+        let data_dir = tempfile::TempDir::new().unwrap();
+        let mock = Arc::new(MockTransport {
+            captured: Mutex::new(vec![]),
+            behavior: Behavior::Ok,
+        });
+        let ctx = two_domain_send_ctx(mock, data_dir.path().to_path_buf());
+        let req = SendRequest {
+            body: body("alice@c.com"),
+            ..Default::default()
+        };
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
+        match resp {
+            SendResponse::Err { code, reason } => {
+                assert_eq!(code, ErrCode::Domain);
+                assert!(reason.contains("c.com"), "{reason}");
+            }
+            other => panic!("expected Err(Domain), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn send_from_per_domain_catchall_is_rejected_as_outbound_sender() {
+        let data_dir = tempfile::TempDir::new().unwrap();
+        let mock = Arc::new(MockTransport {
+            captured: Mutex::new(vec![]),
+            behavior: Behavior::Ok,
+        });
+        let ctx = two_domain_send_ctx(mock, data_dir.path().to_path_buf());
+        // Pretend operator tried to send From: catchall@b.com — the
+        // wildcard catchall must be inbound-only on every configured
+        // domain.
+        let body = b"From: catchall@b.com\r\n\
+                     To: user@gmail.com\r\n\
+                     Subject: Hi\r\n\
+                     Date: Thu, 01 Jan 2025 12:00:00 +0000\r\n\
+                     Message-ID: <abc@example.com>\r\n\
+                     \r\n\
+                     hello\r\n"
+            .to_vec();
+        let req = SendRequest {
+            body,
+            ..Default::default()
+        };
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
+        match resp {
+            SendResponse::Err { code, .. } => assert_eq!(code, ErrCode::Mailbox),
+            other => panic!("expected Err(Mailbox), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn bare_local_part_from_rewrites_to_default_domain() {
+        let data_dir = tempfile::TempDir::new().unwrap();
+        let mock = Arc::new(MockTransport {
+            captured: Mutex::new(vec![]),
+            behavior: Behavior::Ok,
+        });
+        let ctx = two_domain_send_ctx(mock.clone(), data_dir.path().to_path_buf());
+        // Bare local-part "info" — should rewrite to info@a.com
+        // (a.com is domains[0] in the two-domain context).
+        let body = b"From: info\r\n\
+                     To: user@gmail.com\r\n\
+                     Subject: Hi\r\n\
+                     Date: Thu, 01 Jan 2025 12:00:00 +0000\r\n\
+                     Message-ID: <abc@example.com>\r\n\
+                     \r\n\
+                     hello\r\n"
+            .to_vec();
+        let req = SendRequest {
+            body,
+            ..Default::default()
+        };
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
+        assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
+
+        let captured = mock.captured.lock().unwrap();
+        let delivered = String::from_utf8_lossy(&captured[0]);
+        // Delivered body's From: now carries the FQDN form.
+        assert!(
+            delivered.contains("From: info@a.com"),
+            "From: must be rewritten to FQDN; got: {delivered}"
+        );
+        // Signed with a.com's DKIM key.
+        assert!(
+            delivered.contains("d=a.com"),
+            "default-domain DKIM d= tag must land; got: {delivered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bare_local_part_from_with_unknown_mailbox_returns_mailbox_error() {
+        let data_dir = tempfile::TempDir::new().unwrap();
+        let mock = Arc::new(MockTransport {
+            captured: Mutex::new(vec![]),
+            behavior: Behavior::Ok,
+        });
+        let ctx = two_domain_send_ctx(mock, data_dir.path().to_path_buf());
+        // "ghost" — bare local-part with no matching mailbox under a.com.
+        let body = b"From: ghost\r\n\
+                     To: user@gmail.com\r\n\
+                     Subject: Hi\r\n\
+                     Date: Thu, 01 Jan 2025 12:00:00 +0000\r\n\
+                     Message-ID: <abc@example.com>\r\n\
+                     \r\n\
+                     hello\r\n"
+            .to_vec();
+        let req = SendRequest {
+            body,
+            ..Default::default()
+        };
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
+        match resp {
+            SendResponse::Err { code, reason } => {
+                assert_eq!(code, ErrCode::Mailbox);
+                assert!(
+                    reason.contains("ghost@a.com") || reason.contains("ghost"),
+                    "reason should mention bare-local-part or rewritten FQDN: {reason}"
+                );
+            }
+            other => panic!("expected Err(Mailbox), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rewrite_bare_from_passes_fqdn_unchanged() {
+        // FQDN form should pass through with `None` — no rewrite needed.
+        let body = b"From: alice@a.com\r\nTo: bob@b.com\r\n\r\n";
+        let out = rewrite_bare_from_to_default_domain(body, "alice@a.com", "a.com");
+        assert!(out.is_none(), "FQDN form must not trigger rewrite");
+    }
+
+    #[test]
+    fn rewrite_bare_from_handles_display_name_form() {
+        let body = b"From: Alice <alice>\r\nTo: bob@b.com\r\n\r\nbody";
+        let (header, new_body) =
+            rewrite_bare_from_to_default_domain(body, "Alice <alice>", "a.com")
+                .expect("rewrite must trigger on bare local-part");
+        assert!(
+            header.contains("<alice@a.com>"),
+            "rewrite must complete the angle-bracketed local-part: {header}"
+        );
+        let body_str = String::from_utf8_lossy(&new_body);
+        assert!(
+            body_str.contains("alice@a.com"),
+            "body From: must carry the FQDN: {body_str}"
+        );
+    }
+
+    #[test]
+    fn rewrite_from_header_in_body_handles_folded_from_header() {
+        // RFC 5322 §2.2.3 header folding: the From: value runs across
+        // two physical lines. The rewrite must replace the whole
+        // logical header (folded continuation included) rather than
+        // leaving the continuation line stranded with no header name.
+        let body = b"From: Alice\r\n  <alice@a.com>\r\nTo: bob@b.com\r\n\r\nbody";
+        let out = rewrite_from_header_in_body(body, "alice@a.com")
+            .expect("rewrite must locate the folded From: header");
+        let text = String::from_utf8(out).expect("rewrite output must be UTF-8");
+        assert!(
+            text.starts_with("From: alice@a.com\r\nTo: bob@b.com"),
+            "folded From: must be collapsed to a single rewritten header: {text:?}"
+        );
+        assert!(
+            !text.contains("<alice@a.com>"),
+            "folded continuation must not survive the rewrite: {text:?}"
+        );
+        assert!(
+            text.ends_with("\r\n\r\nbody"),
+            "body must be preserved verbatim: {text:?}"
+        );
+    }
+
+    #[test]
+    fn rewrite_from_header_in_body_ignores_from_literal_in_body() {
+        // A quoted forwarded message in the body carries `From:` as
+        // ordinary text. The rewrite must restrict its search to the
+        // header block (everything before the first blank line) so
+        // the body literal cannot be mistaken for the real header.
+        let body = b"To: bob@b.com\r\nSubject: fwd\r\n\r\nFrom: ghost@nowhere\r\nhi\r\n";
+        let out = rewrite_from_header_in_body(body, "alice@a.com");
+        assert!(
+            out.is_none(),
+            "no real From: header → no rewrite; body literal must not match"
+        );
+
+        // Now confirm the dual case: a real From: header AND a body
+        // From: literal. Only the real header is rewritten.
+        let mixed = b"From: alice\r\nTo: bob@b.com\r\n\r\n> From: someone-else@elsewhere\r\nbody";
+        let out = rewrite_from_header_in_body(mixed, "alice@a.com")
+            .expect("real From: header must be located");
+        let text = String::from_utf8(out).expect("rewrite output must be UTF-8");
+        assert!(
+            text.starts_with("From: alice@a.com\r\n"),
+            "real header rewritten: {text:?}"
+        );
+        assert!(
+            text.contains("> From: someone-else@elsewhere"),
+            "body literal must be preserved verbatim: {text:?}"
+        );
     }
 }

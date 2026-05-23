@@ -1605,8 +1605,20 @@ fn ensure_mailbox_dirs(data_dir: &Path, config: &Config) -> Result<(), Box<dyn s
             }
         }
 
-        let inbox = data_dir.join("inbox").join(name);
-        let sent = data_dir.join("sent").join(name);
+        // Route through the canonical storage helper so fresh installs
+        // and post-migration installs both land in the right place. On
+        // a fresh install (no `.layout-version` marker) the helper
+        // returns `<data_dir>/{inbox|sent}/<name>/`; the daemon's
+        // upgrade-migration step relocates these on first start.
+        // Build a synthetic Config view rooted at `data_dir` so the
+        // helper resolves against this caller's path rather than the
+        // process-wide config.
+        let mut synthetic = config.clone();
+        synthetic.data_dir = data_dir.to_path_buf();
+        let inbox =
+            crate::storage::mailbox_storage_path(&synthetic, mb, crate::storage::Folder::Inbox);
+        let sent =
+            crate::storage::mailbox_storage_path(&synthetic, mb, crate::storage::Folder::Sent);
 
         for dir in [&inbox, &sent] {
             std::fs::create_dir_all(dir)?;
@@ -4496,7 +4508,10 @@ owner = "aimx-catchall"
         finalize_setup(tmp.path(), "test.example.com", "aimx", None).unwrap();
 
         let config = Config::load_resolved_ignore_warnings().unwrap();
-        assert!(config.mailboxes.contains_key("alice"));
+        // `create_mailbox` writes FQDN-keyed stanzas so the on-disk
+        // shape matches what the daemon's MAILBOX-CREATE path produces.
+        // The resolver accepts the bare local-part either way.
+        assert!(config.resolve_mailbox_by_name("alice").is_some());
         assert!(config.mailboxes.contains_key("catchall"));
     }
 
