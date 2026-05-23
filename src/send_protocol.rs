@@ -206,6 +206,24 @@ pub struct DomainAddRequest {
     pub selector: Option<String>,
 }
 
+/// Decoded `AIMX/1 DOMAIN-REMOVE` request. The daemon-side handler
+/// runs `auth::authorize(.., Action::DomainCrud)` (root-only) before
+/// doing anything else.
+///
+/// `force = false` (default) refuses when the domain still has
+/// mailboxes — the daemon returns the JSON list of blocking mailbox
+/// FQDNs so the CLI can show them. `force = true` cascades to per-
+/// mailbox wipe + storage-tree rmdir + config rewrite under the
+/// lock hierarchy documented in `book/multi-domain.md`.
+///
+/// Removing the last domain is hard-blocked regardless of `force`:
+/// an AIMX install must have at least one domain to be functional.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DomainRemoveRequest {
+    pub domain: String,
+    pub force: bool,
+}
+
 // `AIMX/1 HOOK-LIST` carries no payload; the daemon resolves the
 // caller via `SO_PEERCRED` and returns the hooks visible to the
 // caller's uid (root sees every hook on every mailbox; non-root sees
@@ -256,6 +274,12 @@ pub enum Request {
     /// `AIMX/1 DOMAIN-ADD` carries the `Domain:` header (required) plus
     /// an optional `Selector:` header. Root-only.
     DomainAdd(DomainAddRequest),
+    /// `AIMX/1 DOMAIN-REMOVE` carries the `Domain:` header (required)
+    /// plus the `Force: true|false` header (also required — the
+    /// cascade flag is intentionally explicit on the wire, not a
+    /// boolean default, so a stale client cannot accidentally request
+    /// a cascade by omission). Root-only.
+    DomainRemove(DomainRemoveRequest),
 }
 
 /// Error codes reported on the wire in `AIMX/1 ERR <code> <reason>`.
@@ -501,6 +525,9 @@ where
         "DOMAIN-ADD" => parse_domain_add_headers(reader)
             .await
             .map(Request::DomainAdd),
+        "DOMAIN-REMOVE" => parse_domain_remove_headers(reader)
+            .await
+            .map(Request::DomainRemove),
         other => Err(ParseError::UnknownVerb(other.to_string())),
     }
 }
@@ -530,9 +557,9 @@ where
         Request::Version => Err(ParseError::Malformed(
             "expected SEND verb, got VERSION".to_string(),
         )),
-        Request::DomainList | Request::DomainAdd(_) => Err(ParseError::Malformed(
-            "expected SEND verb, got DOMAIN-*".to_string(),
-        )),
+        Request::DomainList | Request::DomainAdd(_) | Request::DomainRemove(_) => Err(
+            ParseError::Malformed("expected SEND verb, got DOMAIN-*".to_string()),
+        ),
     }
 }
 
@@ -1067,6 +1094,95 @@ where
         domain.ok_or_else(|| ParseError::Malformed("missing required header: Domain".into()))?;
     let _ = content_length;
     Ok(DomainAddRequest { domain, selector })
+}
+
+/// Parse `AIMX/1 DOMAIN-REMOVE` headers: `Domain:` (required) and
+/// `Force: true|false` (required — explicit on the wire so a stale
+/// client cannot accidentally request a cascade by omission).
+/// `Content-Length:` is allowed but must be 0 (the verb carries no
+/// body).
+async fn parse_domain_remove_headers<R>(reader: &mut R) -> Result<DomainRemoveRequest, ParseError>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut domain: Option<String> = None;
+    let mut force: Option<bool> = None;
+    let mut content_length: Option<usize> = None;
+
+    loop {
+        let line = read_line(reader)
+            .await?
+            .ok_or_else(|| ParseError::Malformed("unexpected EOF in headers".into()))?;
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            break;
+        }
+
+        let (n, v) = line
+            .split_once(':')
+            .ok_or_else(|| ParseError::Malformed(format!("invalid header line: {line:?}")))?;
+
+        if !n.is_ascii() {
+            return Err(ParseError::Malformed(format!(
+                "non-ascii header name: {n:?}"
+            )));
+        }
+        let name_norm = n.trim().to_ascii_lowercase();
+        let value = v.trim().to_string();
+
+        match name_norm.as_str() {
+            "domain" => {
+                if domain.is_some() {
+                    return Err(ParseError::Malformed("duplicate Domain header".into()));
+                }
+                if value.is_empty() {
+                    return Err(ParseError::Malformed("empty Domain value".into()));
+                }
+                domain = Some(value);
+            }
+            "force" => {
+                if force.is_some() {
+                    return Err(ParseError::Malformed("duplicate Force header".into()));
+                }
+                let v_lower = value.to_ascii_lowercase();
+                force = match v_lower.as_str() {
+                    "true" => Some(true),
+                    "false" => Some(false),
+                    _ => {
+                        return Err(ParseError::Malformed(format!(
+                            "invalid Force value: {value:?} (expected 'true' or 'false')"
+                        )));
+                    }
+                };
+            }
+            "content-length" => {
+                if content_length.is_some() {
+                    return Err(ParseError::Malformed(
+                        "duplicate Content-Length header".into(),
+                    ));
+                }
+                let n: usize = value.parse().map_err(|_| {
+                    ParseError::Malformed(format!("non-integer Content-Length: {value:?}"))
+                })?;
+                if n != 0 {
+                    return Err(ParseError::Malformed(format!(
+                        "DOMAIN-REMOVE must have Content-Length: 0, got {n}"
+                    )));
+                }
+                content_length = Some(n);
+            }
+            _ => {
+                // Unknown headers ignored.
+            }
+        }
+    }
+
+    let domain =
+        domain.ok_or_else(|| ParseError::Malformed("missing required header: Domain".into()))?;
+    let force =
+        force.ok_or_else(|| ParseError::Malformed("missing required header: Force".into()))?;
+    let _ = content_length;
+    Ok(DomainRemoveRequest { domain, force })
 }
 
 async fn parse_hook_create_headers_and_body<R>(
@@ -1659,6 +1775,26 @@ where
     Ok(())
 }
 
+/// Write an `AIMX/1 DOMAIN-REMOVE` request frame. `Domain:` is
+/// required; `Force:` is always emitted (`true` / `false`) so a stale
+/// peer cannot infer a cascade by omission.
+pub async fn write_domain_remove_request<W>(
+    writer: &mut W,
+    request: &DomainRemoveRequest,
+) -> Result<(), std::io::Error>
+where
+    W: AsyncWrite + Unpin,
+{
+    let header = format!(
+        "AIMX/1 DOMAIN-REMOVE\nDomain: {}\nForce: {}\nContent-Length: 0\n\n",
+        sanitize_inline(&request.domain),
+        if request.force { "true" } else { "false" },
+    );
+    writer.write_all(header.as_bytes()).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
 /// Strip CR/LF from a single-line wire field. Callers must never emit bare
 /// LF inside a reason or message-ID or the framer ambiguates the next line.
 fn sanitize_inline(s: &str) -> String {
@@ -1794,6 +1930,94 @@ mod mailbox_list_codec_tests {
     #[tokio::test]
     async fn domain_add_rejects_nonzero_content_length() {
         let frame = b"AIMX/1 DOMAIN-ADD\nDomain: b.com\nContent-Length: 5\n\n";
+        let mut reader = std::io::Cursor::new(frame.to_vec());
+        match parse_request(&mut reader).await {
+            Err(ParseError::Malformed(_)) => {}
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    /// Round-trip a `DOMAIN-REMOVE` frame without force: the parser
+    /// decodes back the same struct.
+    #[tokio::test]
+    async fn round_trip_domain_remove_request_without_force() {
+        let req = DomainRemoveRequest {
+            domain: "b.com".into(),
+            force: false,
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        write_domain_remove_request(&mut buf, &req).await.unwrap();
+        let text = std::str::from_utf8(&buf).unwrap();
+        assert!(text.starts_with("AIMX/1 DOMAIN-REMOVE\n"), "{text}");
+        assert!(text.contains("Domain: b.com\n"), "{text}");
+        assert!(text.contains("Force: false\n"), "{text}");
+
+        let mut reader = std::io::Cursor::new(buf);
+        let parsed = parse_request(&mut reader).await.unwrap();
+        assert_eq!(parsed, Request::DomainRemove(req));
+    }
+
+    /// Round-trip a `DOMAIN-REMOVE` frame with force enabled.
+    #[tokio::test]
+    async fn round_trip_domain_remove_request_with_force() {
+        let req = DomainRemoveRequest {
+            domain: "b.com".into(),
+            force: true,
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        write_domain_remove_request(&mut buf, &req).await.unwrap();
+        let text = std::str::from_utf8(&buf).unwrap();
+        assert!(text.contains("Force: true\n"), "{text}");
+
+        let mut reader = std::io::Cursor::new(buf);
+        let parsed = parse_request(&mut reader).await.unwrap();
+        assert_eq!(parsed, Request::DomainRemove(req));
+    }
+
+    /// Missing the required `Domain:` header is a parse error.
+    #[tokio::test]
+    async fn domain_remove_rejects_missing_domain_header() {
+        let frame = b"AIMX/1 DOMAIN-REMOVE\nForce: false\nContent-Length: 0\n\n";
+        let mut reader = std::io::Cursor::new(frame.to_vec());
+        match parse_request(&mut reader).await {
+            Err(ParseError::Malformed(reason)) => {
+                assert!(reason.contains("Domain"), "{reason}");
+            }
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    /// Missing the required `Force:` header is a parse error — the
+    /// cascade flag is intentionally explicit on the wire.
+    #[tokio::test]
+    async fn domain_remove_rejects_missing_force_header() {
+        let frame = b"AIMX/1 DOMAIN-REMOVE\nDomain: b.com\nContent-Length: 0\n\n";
+        let mut reader = std::io::Cursor::new(frame.to_vec());
+        match parse_request(&mut reader).await {
+            Err(ParseError::Malformed(reason)) => {
+                assert!(reason.contains("Force"), "{reason}");
+            }
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    /// An invalid `Force:` value is a parse error.
+    #[tokio::test]
+    async fn domain_remove_rejects_invalid_force_value() {
+        let frame = b"AIMX/1 DOMAIN-REMOVE\nDomain: b.com\nForce: yes\nContent-Length: 0\n\n";
+        let mut reader = std::io::Cursor::new(frame.to_vec());
+        match parse_request(&mut reader).await {
+            Err(ParseError::Malformed(reason)) => {
+                assert!(reason.contains("Force"), "{reason}");
+            }
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    /// A non-zero `Content-Length:` on DOMAIN-REMOVE is a parse error.
+    #[tokio::test]
+    async fn domain_remove_rejects_nonzero_content_length() {
+        let frame = b"AIMX/1 DOMAIN-REMOVE\nDomain: b.com\nForce: false\nContent-Length: 5\n\n";
         let mut reader = std::io::Cursor::new(frame.to_vec());
         match parse_request(&mut reader).await {
             Err(ParseError::Malformed(_)) => {}

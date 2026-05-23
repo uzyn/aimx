@@ -125,6 +125,7 @@ jobs:
           cargo test --no-run --test hooks_list_filter
           cargo test --no-run --test integration
           cargo test --no-run --test domains_uds
+          cargo test --no-run --test domains_remove
 
       - name: Run mailbox isolation test (under sudo)
         run: |
@@ -188,6 +189,21 @@ jobs:
           # harmlessly. `--test-threads=1` avoids contention on the
           # shared `AIMX_CONFIG_DIR` / UDS socket directory.
           BIN=$(ls -t target/debug/deps/domains_uds-* | grep -v '\.d$' | head -n 1)
+          test -x "$BIN"
+          sudo AIMX_INTEGRATION_SUDO=1 "$BIN" --test-threads=1
+
+      - name: Run domains-remove cascade tests (under sudo)
+        run: |
+          # `tests/domains_remove.rs` covers `DOMAIN-REMOVE` over UDS:
+          # clean remove, blocked-by-mailboxes refusal, last-domain
+          # hard-block, --force cascade (mailbox wipe + per-domain
+          # storage rmdir + config rewrite + DKIM map hot-swap with
+          # the keypair preserved on disk), concurrent-ingest stress
+          # against the surviving domain, and the daemon-stopped
+          # fallback for root. Same skip_if_not_root() gate as
+          # domains_uds — run without --ignored under sudo, single
+          # thread to avoid socket contention.
+          BIN=$(ls -t target/debug/deps/domains_remove-* | grep -v '\.d$' | head -n 1)
           test -x "$BIN"
           sudo AIMX_INTEGRATION_SUDO=1 "$BIN" --test-threads=1
 

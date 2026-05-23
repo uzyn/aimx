@@ -1139,6 +1139,19 @@ async fn handle_uds_connection_with_timeout(
                 ),
                 false,
             ),
+            Ok(Ok(Request::DomainRemove(req))) => (
+                Reply::Json(
+                    crate::domain_handler::handle_domain_remove(
+                        &state_ctx,
+                        &mb_ctx,
+                        &send_ctx.dkim_keys,
+                        &req,
+                        &caller,
+                    )
+                    .await,
+                ),
+                false,
+            ),
             Ok(Ok(Request::Version)) => (
                 Reply::Version(crate::version_handler::current_version_response()),
                 false,
