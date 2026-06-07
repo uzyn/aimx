@@ -50,7 +50,7 @@ jobs:
       # Use `taiki-e/install-action` to pull a prebuilt `cross` binary
       # into `~/.cargo/bin` instead of recompiling it from source on
       # every matrix shard (saved ~1–2 min per leg).
-      - uses: taiki-e/install-action@873c7452cadb7c034694a1282227095d93fbdf92 # v2.79.14
+      - uses: taiki-e/install-action@59012be0884e296ca2da49b530610e72c49039ad # v2.81.6
         with:
           tool: cross@0.2.5
 
