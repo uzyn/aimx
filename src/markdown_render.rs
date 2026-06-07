@@ -149,10 +149,10 @@ pub fn inline_email_styles(html: &str) -> String {
     use lol_html::{HtmlRewriter, Settings, element};
 
     let mut output: Vec<u8> = Vec::with_capacity(html.len() + 1024);
-    let element_handlers: Vec<_> = STYLED_TAGS
+    let settings = STYLED_TAGS
         .iter()
-        .map(|(tag, style)| {
-            element!(*tag, move |el| {
+        .fold(Settings::new(), |settings, (tag, style)| {
+            settings.append_element_content_handler(element!(*tag, move |el| {
                 let merged = match el.get_attribute("style") {
                     Some(existing) if !existing.trim().is_empty() => {
                         let trimmed = existing.trim_end_matches(';').trim_end();
@@ -163,17 +163,10 @@ pub fn inline_email_styles(html: &str) -> String {
                 el.set_attribute("style", &merged)
                     .expect("style is always a valid attribute name");
                 Ok(())
-            })
-        })
-        .collect();
+            }))
+        });
 
-    let mut rewriter = HtmlRewriter::new(
-        Settings {
-            element_content_handlers: element_handlers,
-            ..Settings::default()
-        },
-        |chunk: &[u8]| output.extend_from_slice(chunk),
-    );
+    let mut rewriter = HtmlRewriter::new(settings, |chunk: &[u8]| output.extend_from_slice(chunk));
 
     if rewriter.write(html.as_bytes()).is_err() || rewriter.end().is_err() {
         // The rewriter only fails on internal-state issues we don't expect
