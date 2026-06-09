@@ -5166,6 +5166,88 @@ fn cli_hooks_delete_with_unreadable_config_does_not_surface_eacces() {
     stop_serve(daemon);
 }
 
+/// Regression test: when the daemon is NOT running (no UDS socket) AND
+/// the config is unreadable (`0000`, the non-root default-install
+/// shape), `aimx hooks list | create | delete` must surface the
+/// actionable daemon-down hint — not a raw `Permission denied`
+/// (os error 13) from the eager config read, and not a confusing EACCES
+/// from a doomed direct-config-edit fallback the non-root caller cannot
+/// perform. This guards the SocketMissing branch in `hooks.rs`'s
+/// `list_via_daemon` / `create` / `delete_via_daemon`, which routes
+/// through the canonical `NotRoot` auth error plus
+/// `append_daemon_down_hint`.
+#[cfg(unix)]
+#[test]
+fn cli_hooks_daemon_down_non_root_emits_hint_not_eacces() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!(
+            "skipping: chmod 0000 has no effect on root, and root falls back to a direct edit"
+        );
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    // Empty runtime dir => no `aimx.sock` => daemon-down condition. We
+    // never start `aimx serve`, so the UDS connect fails with
+    // SocketMissing rather than a daemon-side error.
+    let runtime = tmp.path().join("run");
+    std::fs::create_dir_all(&runtime).unwrap();
+    let sock = runtime.join("aimx.sock");
+    assert!(!sock.exists(), "no daemon should be running for this test");
+
+    use std::os::unix::fs::PermissionsExt;
+    let config_path = tmp.path().join("config.toml");
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    // Assert that a command's stderr carries the daemon-down hint and
+    // never leaks a raw EACCES. Each subcommand shares the same
+    // SocketMissing rendering, so they all get the same treatment.
+    let assert_hint = |label: &str, args: &[&str]| {
+        let assert = aimx_cmd_daemon(tmp.path())
+            .arg("--data-dir")
+            .arg(tmp.path())
+            .args(args)
+            .assert()
+            .failure();
+        let out = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+        let err = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+        assert!(
+            !out.contains("Permission denied") && !err.contains("Permission denied"),
+            "{label} must not surface EACCES; stdout={out} stderr={err}"
+        );
+        // The canonical NotRoot rendering ("... requires root (run with
+        // sudo)") plus the appended daemon-down hint ("if the daemon is
+        // running ...") together form the actionable message. Assert on
+        // the substrings the code actually emits.
+        assert!(
+            err.contains("sudo") && err.contains("if the daemon is running"),
+            "{label} must surface the actionable daemon-down hint; stderr={err}"
+        );
+    };
+
+    assert_hint("hooks list", &["hooks", "list"]);
+    assert_hint(
+        "hooks create",
+        &[
+            "hooks",
+            "create",
+            "--mailbox",
+            "alice",
+            "--event",
+            "on_receive",
+            "--cmd",
+            r#"["/bin/true"]"#,
+            "--name",
+            "cli_daemon_down_hook",
+        ],
+    );
+    assert_hint("hooks delete", &["hooks", "delete", "--yes", "some_hook"]);
+
+    // The doomed fallback never ran: the unreadable config is untouched.
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o640)).unwrap();
+}
+
 /// Cycle 2 regression guard for Blocker 2: the MCP `mailbox_create`
 /// tool must work end-to-end against a real daemon for a non-root
 /// caller. Cycle 1 shipped the tool but the wire-protocol parser
