@@ -151,6 +151,18 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // LIST falls back to `MAILBOX-LIST`; SHOW errors with an
         // actionable hint).
         Command::Mailboxes(cmd) => mailbox::run(cmd, cli.data_dir.as_deref()),
+        // `aimx hooks` is a thin UDS client like `aimx mailboxes`. It
+        // must NOT pre-load config here — `/etc/aimx/config.toml` is
+        // `0640 root:root` in production, so an eager
+        // `Config::load_resolved_with_data_dir(...)?` would surface
+        // `Permission denied (os error 13)` for a non-root mailbox
+        // owner before `hooks::run` ever sees the request, defeating
+        // the daemon-UDS path the hooks CLI already implements.
+        // `hooks::run` loads the config optionally and routes
+        // `list` / `create` / `delete` through the `HOOK-LIST` /
+        // `HOOK-CREATE` / `HOOK-DELETE` verbs when the local config is
+        // unreadable.
+        Command::Hooks(cmd) => hooks::run(cmd, cli.data_dir.as_deref()),
         // `aimx upgrade` reads the release-manifest URL from Config
         // (optional `[upgrade] release_manifest_url`) but tolerates a
         // missing / unloadable config — a freshly-installed machine
@@ -196,7 +208,6 @@ fn dispatch_with_config(
 ) -> Result<(), Box<dyn std::error::Error>> {
     match cmd {
         Command::Ingest { rcpt } => ingest::run(&rcpt, config),
-        Command::Hooks(cmd) => hooks::run(cmd, config),
         Command::DkimKeygen { selector, force } => {
             dkim::run_keygen(&config::dkim_dir(), &config.domain, &selector, force)
         }
@@ -218,6 +229,7 @@ fn dispatch_with_config(
         | Command::Send(_)
         | Command::Logs { .. }
         | Command::Mailboxes(_)
+        | Command::Hooks(_)
         | Command::Agents(_)
         | Command::Upgrade(_) => unreachable!("handled by dispatch"),
     }

@@ -1,25 +1,31 @@
 //! `aimx hooks list | create | delete` CLI.
 //!
 //! With template hooks gone, every hook in `config.toml` is a raw argv
-//! stored under `[[mailboxes.<name>.hooks]]`. CRUD goes through the
-//! daemon UDS first (`HOOK-CREATE` / `HOOK-DELETE`) so the running
-//! daemon hot-swaps its in-memory `Config` without a restart. The
-//! daemon enforces caller-uid = mailbox-owner-uid (or root) per the
-//! single auth predicate in `src/auth.rs`. When the daemon is down:
-//! root falls back to a direct `config.toml` edit + restart hint;
-//! non-root hard-errors because it cannot write the root-owned config.
+//! stored under `[[mailboxes.<name>.hooks]]`. All three subcommands go
+//! through the daemon UDS first (`HOOK-LIST` / `HOOK-CREATE` /
+//! `HOOK-DELETE`) so the running daemon hot-swaps its in-memory
+//! `Config` without a restart. The daemon enforces caller-uid =
+//! mailbox-owner-uid (or root) per the single auth predicate in
+//! `src/auth.rs`, keyed on the kernel-validated `SO_PEERCRED` uid.
 //!
-//! `list` reads the locally-loaded `Config` and filters to caller-owned
-//! mailboxes for non-root callers. Reads do not need the daemon —
-//! `config.toml` is `0640 root:root`, but the local
-//! `dispatch_with_config` path uses `Config::load_resolved`, which
-//! requires read access. Non-root operators on a default install
-//! cannot read `/etc/aimx/config.toml`; the load failure is surfaced
-//! by the dispatcher before the CLI is reached, with a "permission
-//! denied" message that is more actionable than this layer would
-//! produce.
+//! The local `Config` is loaded *optionally* (mirroring
+//! `src/mailbox.rs`) because `/etc/aimx/config.toml` is `0640
+//! root:root` in production: a non-root mailbox owner cannot read it,
+//! so an eager load would surface `Permission denied (os error 13)`
+//! before any hooks code runs. When the config loads (root, or a
+//! readable install) the local code path is used — `list` applies the
+//! same per-caller-euid ownership filter as `aimx mailboxes list`, and
+//! `create` / `delete` run a local authz pre-flight. When the config
+//! is unreadable, `list` falls back to the `HOOK-LIST` verb (already
+//! ownership-filtered server-side) and `create` / `delete` rely on the
+//! daemon's `SO_PEERCRED` authz.
+//!
+//! When the daemon is down: root falls back to a direct `config.toml`
+//! edit + restart hint; non-root hard-errors because it cannot write
+//! (or read) the root-owned config.
 
 use std::io::{self, Write};
+use std::path::Path;
 
 use crate::auth::{Action, AuthErrorContext, authorize, format_auth_error};
 use crate::cli::{HookCommand, HookCreateArgs};
@@ -27,15 +33,39 @@ use crate::config::{Config, validate_hooks};
 use crate::hook::{
     DEFAULT_HOOK_TIMEOUT_SECS, Hook, HookEvent, effective_hook_name, is_valid_hook_name,
 };
-use crate::mcp::{HookCrudFallback, submit_hook_create_via_daemon, submit_hook_delete_via_daemon};
+use crate::mcp::{
+    HookCrudFallback, MailboxLifecycleFallback, submit_hook_create_via_daemon,
+    submit_hook_delete_via_daemon, submit_hook_list_via_daemon_for_cli,
+};
 use crate::platform::{current_euid, is_root};
 use crate::term;
 
-pub fn run(cmd: HookCommand, config: Config) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(cmd: HookCommand, data_dir: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
+    // Load config optionally so a non-root caller — who cannot read
+    // `0640 root:root /etc/aimx/config.toml` in production — still
+    // reaches the subcommand code and routes through the daemon UDS.
+    // Each subcommand decides whether the missing-config case is
+    // recoverable.
+    let loaded = crate::mailbox::load_config_optional(data_dir);
+
     match cmd {
-        HookCommand::List { mailbox } => list(&config, mailbox.as_deref()),
-        HookCommand::Create(args) => create(&config, args),
-        HookCommand::Delete { name, yes } => delete(&config, &name, yes),
+        HookCommand::List { mailbox } => list_dispatch(loaded.as_ref(), mailbox.as_deref()),
+        HookCommand::Create(args) => create(loaded.as_ref(), args),
+        HookCommand::Delete { name, yes } => delete(loaded.as_ref(), &name, yes),
+    }
+}
+
+/// `hooks list` dispatcher. With a readable config we walk it locally
+/// (applying the per-caller-euid ownership filter); without one — the
+/// non-root default-install case — we route through the daemon's
+/// `HOOK-LIST` verb, which is already ownership-filtered server-side.
+fn list_dispatch(
+    config: Option<&Config>,
+    filter_mailbox: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match config {
+        Some(cfg) => list(cfg, filter_mailbox),
+        None => list_via_daemon(filter_mailbox),
     }
 }
 
@@ -46,10 +76,8 @@ fn list(config: &Config, filter_mailbox: Option<&str>) -> Result<(), Box<dyn std
         return Err(format!("Mailbox '{name}' does not exist").into());
     }
 
-    // Non-root callers see only hooks on mailboxes they own. The
-    // daemon does not have a HOOK-LIST verb today; reads come straight
-    // from the locally-loaded Config snapshot the dispatcher already
-    // produced, with the same euid filter as `aimx mailboxes list`.
+    // Non-root callers see only hooks on mailboxes they own, using the
+    // same euid filter as `aimx mailboxes list`.
     let caller_is_root = is_root();
     let euid = current_euid();
     let mut rows = gather_rows(config, filter_mailbox);
@@ -63,9 +91,59 @@ fn list(config: &Config, filter_mailbox: Option<&str>) -> Result<(), Box<dyn std
             .then_with(|| a.name.cmp(&b.name))
     });
 
+    render_hook_rows(&rows);
+    Ok(())
+}
+
+/// Non-root fallback for `hooks list` when the local config is
+/// unreadable. The daemon's `HOOK-LIST` rows are already filtered to
+/// mailboxes the caller's `SO_PEERCRED` uid owns and sorted by
+/// `(mailbox, event, name)`, so we only re-apply the optional
+/// `--mailbox` filter and render. A socket-missing daemon yields the
+/// canonical "daemon must be running" hint; a daemon-side error
+/// bubbles verbatim.
+fn list_via_daemon(filter_mailbox: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    let json = match submit_hook_list_via_daemon_for_cli() {
+        Ok(s) => s,
+        Err(MailboxLifecycleFallback::SocketMissing) => {
+            return Err(append_daemon_down_hint(format_auth_error(
+                &crate::auth::AuthError::NotRoot,
+                &hooks_ctx("list"),
+            ))
+            .into());
+        }
+        Err(MailboxLifecycleFallback::Daemon(msg)) => return Err(msg.into()),
+    };
+
+    let rows: Vec<crate::hook_list_handler::HookListRow> =
+        serde_json::from_str(&json).map_err(|e| format!("malformed HOOK-LIST response: {e}"))?;
+
+    // The daemon's listing is opaque between "mailbox doesn't exist"
+    // and "exists but not owned by the caller", so a `--mailbox` filter
+    // that matches nothing simply renders "No hooks configured." rather
+    // than the local path's "Mailbox '<name>' does not exist" error.
+    let rows: Vec<HookRow> = rows
+        .into_iter()
+        .filter(|r| filter_mailbox.is_none_or(|f| f == r.mailbox))
+        .map(|r| HookRow {
+            name: r.name,
+            mailbox: r.mailbox,
+            event: r.event.as_str(),
+            cmd: format_argv_for_display(&r.cmd),
+            timeout_secs: r.timeout_secs,
+        })
+        .collect();
+
+    render_hook_rows(&rows);
+    Ok(())
+}
+
+/// Render the hook table (or the empty-state line). Shared by the local
+/// and daemon-backed list paths so both emit byte-identical output.
+fn render_hook_rows(rows: &[HookRow]) {
     if rows.is_empty() {
         println!("No hooks configured.");
-        return Ok(());
+        return;
     }
 
     println!(
@@ -86,7 +164,18 @@ fn list(config: &Config, filter_mailbox: Option<&str>) -> Result<(), Box<dyn std
             truncate_with_ellipsis(&row.cmd, 60),
         );
     }
-    Ok(())
+}
+
+/// Build the `AuthErrorContext` the hooks CLI uses for every authz
+/// error so the rendered wording stays consistent across `list` /
+/// `create` / `delete`.
+fn hooks_ctx(verb: &'static str) -> AuthErrorContext<'static> {
+    AuthErrorContext {
+        surface: Some("aimx hooks"),
+        verb: Some(verb),
+        resource: Some("resource"),
+        ..Default::default()
+    }
 }
 
 struct HookRow {
@@ -135,7 +224,7 @@ fn truncate_with_ellipsis(s: &str, max: usize) -> String {
     out
 }
 
-fn create(config: &Config, args: HookCreateArgs) -> Result<(), Box<dyn std::error::Error>> {
+fn create(config: Option<&Config>, args: HookCreateArgs) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(name) = &args.name
         && !is_valid_hook_name(name)
     {
@@ -144,36 +233,31 @@ fn create(config: &Config, args: HookCreateArgs) -> Result<(), Box<dyn std::erro
         )
         .into());
     }
-    let mb_cfg = config
-        .mailboxes
-        .get(&args.mailbox)
-        .ok_or_else(|| format!("Mailbox '{}' does not exist", args.mailbox))?;
 
-    // Pre-flight authz so non-owners get a precise error before any
-    // socket I/O. The daemon enforces the same predicate; we run it
-    // here too so non-root + daemon-down + non-owner errors out
-    // consistently rather than producing a misleading "daemon not
-    // running" message.
-    let euid = current_euid();
     // `AIMX_TEST_SKIP_AUTHZ_CHECK=1` is the test-harness opt-in documented
     // in `CLAUDE.md`'s "Test environment escape hatches" section. It
     // bypasses the entire `authorize()` call (gating `Action::HookCrud`)
     // so the post-gate code path stays exercised under non-root
     // `cargo test`. Never set in production.
     let skip_authz_check = std::env::var_os("AIMX_TEST_SKIP_AUTHZ_CHECK").is_some();
-    if !skip_authz_check
-        && let Err(e) = authorize(euid, Action::HookCrud(args.mailbox.clone()), Some(mb_cfg))
-    {
-        return Err(format_auth_error(
-            &e,
-            &AuthErrorContext {
-                surface: Some("aimx hooks"),
-                verb: Some("create"),
-                resource: Some("resource"),
-                ..Default::default()
-            },
-        )
-        .into());
+    let euid = current_euid();
+
+    // Local pre-flight authz only when the config is readable (root, or
+    // a readable install) so non-owners get a precise error before any
+    // socket I/O. With an unreadable config (non-root default install)
+    // we skip the local check and rely on the daemon's `SO_PEERCRED`
+    // authz; the mailbox-existence and authz errors then come back over
+    // UDS verbatim.
+    if let Some(cfg) = config {
+        let mb_cfg = cfg
+            .mailboxes
+            .get(&args.mailbox)
+            .ok_or_else(|| format!("Mailbox '{}' does not exist", args.mailbox))?;
+        if !skip_authz_check
+            && let Err(e) = authorize(euid, Action::HookCrud(args.mailbox.clone()), Some(mb_cfg))
+        {
+            return Err(format_auth_error(&e, &hooks_ctx("create")).into());
+        }
     }
 
     let event = parse_event(&args.event)?;
@@ -211,34 +295,33 @@ fn create(config: &Config, args: HookCreateArgs) -> Result<(), Box<dyn std::erro
             Ok(())
         }
         Err(HookCrudFallback::SocketMissing) => {
-            // Daemon down. Only root can rewrite the root-owned
-            // config.toml; non-root callers hard-error so we don't
-            // pretend the change went through. Route the error through
-            // the canonical `format_auth_error` so wording stays
-            // consistent with every other authz-error surface, then
+            // Daemon down. The direct on-disk fallback needs a readable
+            // config (to clone + re-serialize) and write access to the
+            // root-owned config.toml, so it is gated on `Some(cfg)` and
+            // root (or the test escape hatch). Otherwise we hard-error
+            // so we don't pretend the change went through. Route the
+            // error through the canonical `format_auth_error` so wording
+            // stays consistent with every other authz-error surface, then
             // append a daemon-down hint so operators see why sudo is
-            // required (the canonical wording mentions sudo but not
-            // the underlying "daemon is down" cause).
-            if !skip_authz_check && !is_root() {
-                return Err(append_daemon_down_hint(format_auth_error(
+            // required (the canonical wording mentions sudo but not the
+            // underlying "daemon is down" cause).
+            match config {
+                Some(cfg) if is_root() || skip_authz_check => {
+                    apply_create_direct(cfg, &args.mailbox, hook)?;
+                    println!(
+                        "{} {}",
+                        term::success("Hook created:"),
+                        term::highlight(&effective)
+                    );
+                    print_restart_hint();
+                    Ok(())
+                }
+                _ => Err(append_daemon_down_hint(format_auth_error(
                     &crate::auth::AuthError::NotRoot,
-                    &AuthErrorContext {
-                        surface: Some("aimx hooks"),
-                        verb: Some("create"),
-                        resource: Some("resource"),
-                        ..Default::default()
-                    },
+                    &hooks_ctx("create"),
                 ))
-                .into());
+                .into()),
             }
-            apply_create_direct(config, &args.mailbox, hook)?;
-            println!(
-                "{} {}",
-                term::success("Hook created:"),
-                term::highlight(&effective)
-            );
-            print_restart_hint();
-            Ok(())
         }
         Err(HookCrudFallback::Daemon(msg)) => Err(msg.into()),
     }
@@ -265,31 +348,40 @@ fn build_hook_create_body(
     Ok(serde_json::to_vec(&body)?)
 }
 
-fn delete(config: &Config, name: &str, yes: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn delete(
+    config: Option<&Config>,
+    name: &str,
+    yes: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match config {
+        Some(cfg) => delete_with_config(cfg, name, yes),
+        None => delete_via_daemon(name, yes),
+    }
+}
+
+/// `hooks delete` with a readable local config: resolve the hook for
+/// the confirmation prompt + local authz pre-flight, then dispatch over
+/// UDS (with the root-only direct-edit fallback when the daemon is down).
+fn delete_with_config(
+    config: &Config,
+    name: &str,
+    yes: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let (mailbox, hook) = match find_hook_by_effective_name(config, name) {
         Some(pair) => pair,
         None => return Err(format!("Hook '{name}' not found").into()),
     };
 
-    if !yes {
-        println!("{}", term::warn("About to delete hook:"));
-        println!("  {}   {}", term::header("name:   "), term::highlight(name));
-        println!("  {}   {}", term::header("mailbox:"), mailbox);
-        println!("  {}   {}", term::header("event:  "), hook.event);
-        println!("  {}   {}", term::header("timeout:"), hook.timeout_secs);
-        println!(
-            "  {}   {}",
-            term::header("cmd:    "),
-            truncate_with_ellipsis(&format_argv_for_display(&hook.cmd), 60)
-        );
-        print!("Continue? [y/N] ");
-        io::stdout().flush()?;
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        if !input.trim().eq_ignore_ascii_case("y") {
-            println!("Cancelled.");
-            return Ok(());
-        }
+    if !yes
+        && !confirm_delete(
+            name,
+            &mailbox,
+            hook.event.as_str(),
+            hook.timeout_secs,
+            &format_argv_for_display(&hook.cmd),
+        )?
+    {
+        return Ok(());
     }
 
     let euid = current_euid();
@@ -301,52 +393,129 @@ fn delete(config: &Config, name: &str, yes: bool) -> Result<(), Box<dyn std::err
     if !skip_authz_check {
         let mb_cfg = config.mailboxes.get(&mailbox);
         if let Err(e) = authorize(euid, Action::HookCrud(mailbox.clone()), mb_cfg) {
-            return Err(format_auth_error(
-                &e,
-                &AuthErrorContext {
-                    surface: Some("aimx hooks"),
-                    verb: Some("delete"),
-                    resource: Some("resource"),
-                    ..Default::default()
-                },
-            )
-            .into());
+            return Err(format_auth_error(&e, &hooks_ctx("delete")).into());
         }
     }
 
     match submit_hook_delete_via_daemon(name) {
         Ok(()) => {
-            println!(
-                "{} {} (live via daemon)",
-                term::success("Hook deleted:"),
-                term::highlight(name)
-            );
+            print_hook_deleted_live(name);
             Ok(())
         }
         Err(HookCrudFallback::SocketMissing) => {
-            if !skip_authz_check && !is_root() {
-                return Err(append_daemon_down_hint(format_auth_error(
+            if is_root() || skip_authz_check {
+                apply_delete_direct(config, name)?;
+                println!(
+                    "{} {}",
+                    term::success("Hook deleted:"),
+                    term::highlight(name)
+                );
+                print_restart_hint();
+                Ok(())
+            } else {
+                Err(append_daemon_down_hint(format_auth_error(
                     &crate::auth::AuthError::NotRoot,
-                    &AuthErrorContext {
-                        surface: Some("aimx hooks"),
-                        verb: Some("delete"),
-                        resource: Some("resource"),
-                        ..Default::default()
-                    },
+                    &hooks_ctx("delete"),
                 ))
-                .into());
+                .into())
             }
-            apply_delete_direct(config, name)?;
-            println!(
-                "{} {}",
-                term::success("Hook deleted:"),
-                term::highlight(name)
-            );
-            print_restart_hint();
-            Ok(())
         }
         Err(HookCrudFallback::Daemon(msg)) => Err(msg.into()),
     }
+}
+
+/// `hooks delete` without a readable local config (non-root default
+/// install). Resolve the hook from the daemon's `HOOK-LIST` view for the
+/// confirmation prompt, then submit `HOOK-DELETE`. The daemon
+/// re-authorizes via `SO_PEERCRED`, so no local authz pre-flight runs.
+fn delete_via_daemon(name: &str, yes: bool) -> Result<(), Box<dyn std::error::Error>> {
+    if !yes {
+        let json = match submit_hook_list_via_daemon_for_cli() {
+            Ok(s) => s,
+            Err(MailboxLifecycleFallback::SocketMissing) => {
+                return Err(append_daemon_down_hint(format_auth_error(
+                    &crate::auth::AuthError::NotRoot,
+                    &hooks_ctx("delete"),
+                ))
+                .into());
+            }
+            Err(MailboxLifecycleFallback::Daemon(msg)) => return Err(msg.into()),
+        };
+        let rows: Vec<crate::hook_list_handler::HookListRow> = serde_json::from_str(&json)
+            .map_err(|e| format!("malformed HOOK-LIST response: {e}"))?;
+        // The daemon's listing is already filtered to hooks the caller
+        // owns, so a name absent here is opaque between "no such hook"
+        // and "not owned" — surface the same not-found error either way.
+        let row = rows
+            .iter()
+            .find(|r| r.name == name)
+            .ok_or_else(|| format!("Hook '{name}' not found"))?;
+        if !confirm_delete(
+            name,
+            &row.mailbox,
+            row.event.as_str(),
+            row.timeout_secs,
+            &format_argv_for_display(&row.cmd),
+        )? {
+            return Ok(());
+        }
+    }
+
+    match submit_hook_delete_via_daemon(name) {
+        Ok(()) => {
+            print_hook_deleted_live(name);
+            Ok(())
+        }
+        // The daemon is the only writer for a non-root caller; with no
+        // readable config there is no direct-edit fallback.
+        Err(HookCrudFallback::SocketMissing) => Err(append_daemon_down_hint(format_auth_error(
+            &crate::auth::AuthError::NotRoot,
+            &hooks_ctx("delete"),
+        ))
+        .into()),
+        Err(HookCrudFallback::Daemon(msg)) => Err(msg.into()),
+    }
+}
+
+/// Print the "About to delete hook" summary and read a `[y/N]`
+/// confirmation. Returns `Ok(true)` to proceed, `Ok(false)` when the
+/// operator declines (and prints "Cancelled." so both delete paths emit
+/// identical output).
+fn confirm_delete(
+    name: &str,
+    mailbox: &str,
+    event: &str,
+    timeout_secs: u32,
+    cmd_display: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    println!("{}", term::warn("About to delete hook:"));
+    println!("  {}   {}", term::header("name:   "), term::highlight(name));
+    println!("  {}   {}", term::header("mailbox:"), mailbox);
+    println!("  {}   {}", term::header("event:  "), event);
+    println!("  {}   {}", term::header("timeout:"), timeout_secs);
+    println!(
+        "  {}   {}",
+        term::header("cmd:    "),
+        truncate_with_ellipsis(cmd_display, 60)
+    );
+    print!("Continue? [y/N] ");
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    if input.trim().eq_ignore_ascii_case("y") {
+        Ok(true)
+    } else {
+        println!("Cancelled.");
+        Ok(false)
+    }
+}
+
+fn print_hook_deleted_live(name: &str) {
+    println!(
+        "{} {} (live via daemon)",
+        term::success("Hook deleted:"),
+        term::highlight(name)
+    );
 }
 
 fn parse_event(s: &str) -> Result<HookEvent, Box<dyn std::error::Error>> {
