@@ -54,7 +54,7 @@ pub fn run(cmd: MailboxCommand, data_dir: Option<&Path>) -> Result<(), Box<dyn s
 /// UDS (where `SO_PEERCRED` is the authoritative identity) without
 /// ever needing to read the root-owned config from a non-root
 /// process.
-fn load_config_optional(data_dir: Option<&Path>) -> Option<Config> {
+pub(crate) fn load_config_optional(data_dir: Option<&Path>) -> Option<Config> {
     crate::config::Config::load_resolved_with_data_dir(data_dir)
         .map(|(cfg, _warnings)| cfg)
         .ok()

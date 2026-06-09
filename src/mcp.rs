@@ -1356,6 +1356,16 @@ pub(crate) fn submit_mailbox_list_via_daemon_for_cli() -> Result<String, Mailbox
     submit_mailbox_list_raw()
 }
 
+/// CLI-friendly variant of [`submit_hook_list_via_daemon`]. Where the
+/// MCP variant collapses socket-missing into a String, this preserves
+/// the [`MailboxLifecycleFallback`] tag so `aimx hooks list` can emit
+/// the hooks-flavored "daemon must be running" hint on socket-missing
+/// and surface a daemon-side error verbatim. Mirrors
+/// [`submit_mailbox_list_via_daemon_for_cli`].
+pub(crate) fn submit_hook_list_via_daemon_for_cli() -> Result<String, MailboxLifecycleFallback> {
+    submit_hook_list_raw()
+}
+
 fn submit_mailbox_list_raw() -> Result<String, MailboxLifecycleFallback> {
     let socket = crate::serve::aimx_socket_path();
 

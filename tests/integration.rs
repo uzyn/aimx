@@ -4991,6 +4991,263 @@ fn mcp_hook_delete_with_unreadable_config_does_not_surface_eacces() {
     stop_serve(daemon);
 }
 
+/// Build an `aimx` command wired to talk to a running daemon: config
+/// dir + runtime dir both point at the test's tempdir (matching
+/// `start_serve`'s `AIMX_RUNTIME_DIR`), so the CLI reaches the daemon
+/// UDS instead of the host's `/run/aimx/aimx.sock`. Unlike
+/// `aimx_cmd_isolated`, this does NOT set `AIMX_TEST_SKIP_AUTHZ_CHECK`
+/// — the daemon re-authorizes via `SO_PEERCRED`, and the non-root path
+/// these tests exercise must not read the root-owned config locally.
+fn aimx_cmd_daemon(tmp: &Path) -> Command {
+    let runtime = tmp.join("run");
+    let mut cmd = Command::cargo_bin("aimx").unwrap();
+    cmd.env("AIMX_CONFIG_DIR", tmp);
+    cmd.env("AIMX_RUNTIME_DIR", &runtime);
+    cmd.env("AIMX_SANDBOX_FORCE_FALLBACK", "1");
+    cmd
+}
+
+/// Regression test: `aimx hooks list` against a `0000` config routes
+/// through the `HOOK-LIST` UDS verb and never reads `config.toml`, so a
+/// non-root caller does not hit `Permission denied`. Mirrors the MCP
+/// `hook_list` equivalent.
+#[cfg(unix)]
+#[test]
+fn cli_hooks_list_with_unreadable_config_does_not_surface_eacces() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipping: chmod 0000 has no effect on root");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS socket never appeared"
+    );
+
+    use std::os::unix::fs::PermissionsExt;
+    let config_path = tmp.path().join("config.toml");
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let assert = aimx_cmd_daemon(tmp.path())
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .args(["hooks", "list"])
+        .assert()
+        .success();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    let err = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        !out.contains("Permission denied") && !err.contains("Permission denied"),
+        "hooks list must not surface EACCES; stdout={out} stderr={err}"
+    );
+
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o640)).unwrap();
+    stop_serve(daemon);
+}
+
+/// Regression test: `aimx hooks create` against a `0000` config submits
+/// over the `HOOK-CREATE` UDS verb (daemon re-authorizes via
+/// `SO_PEERCRED`) without reading `config.toml`, so a non-root mailbox
+/// owner does not hit `Permission denied`. The created hook then shows
+/// up via `aimx hooks list`.
+#[cfg(unix)]
+#[test]
+fn cli_hooks_create_with_unreadable_config_does_not_surface_eacces() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipping: chmod 0000 has no effect on root");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS socket never appeared"
+    );
+
+    use std::os::unix::fs::PermissionsExt;
+    let config_path = tmp.path().join("config.toml");
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let create = aimx_cmd_daemon(tmp.path())
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .args([
+            "hooks",
+            "create",
+            "--mailbox",
+            "alice",
+            "--event",
+            "on_receive",
+            "--cmd",
+            r#"["/bin/true"]"#,
+            "--name",
+            "cli_unreadable_hook",
+        ])
+        .assert()
+        .success();
+    let out = String::from_utf8_lossy(&create.get_output().stdout).to_string();
+    let err = String::from_utf8_lossy(&create.get_output().stderr).to_string();
+    assert!(
+        !out.contains("Permission denied") && !err.contains("Permission denied"),
+        "hooks create must not surface EACCES; stdout={out} stderr={err}"
+    );
+    assert!(out.contains("Hook created"), "create output: {out}");
+
+    let list = aimx_cmd_daemon(tmp.path())
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .args(["hooks", "list"])
+        .assert()
+        .success();
+    let list_out = String::from_utf8_lossy(&list.get_output().stdout).to_string();
+    assert!(
+        list_out.contains("cli_unreadable_hook"),
+        "created hook should appear in list: {list_out}"
+    );
+
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o640)).unwrap();
+    stop_serve(daemon);
+}
+
+/// Regression test: `aimx hooks delete` against a `0000` config is a
+/// thin pass-through to `HOOK-DELETE` over UDS — no `config.toml` read,
+/// so a non-root caller does not hit `Permission denied`. A name the
+/// daemon doesn't know returns an opaque not-found error rather than an
+/// EACCES.
+#[cfg(unix)]
+#[test]
+fn cli_hooks_delete_with_unreadable_config_does_not_surface_eacces() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipping: chmod 0000 has no effect on root");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS socket never appeared"
+    );
+
+    use std::os::unix::fs::PermissionsExt;
+    let config_path = tmp.path().join("config.toml");
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let assert = aimx_cmd_daemon(tmp.path())
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .args(["hooks", "delete", "--yes", "no_such_hook"])
+        .assert()
+        .failure();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    let err = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        !out.contains("Permission denied") && !err.contains("Permission denied"),
+        "hooks delete must not surface EACCES; stdout={out} stderr={err}"
+    );
+    assert!(
+        err.contains("not found") || err.contains("ENOENT"),
+        "hooks delete error should be opaque not-found: stdout={out} stderr={err}"
+    );
+
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o640)).unwrap();
+    stop_serve(daemon);
+}
+
+/// Regression test: when the daemon is NOT running (no UDS socket) AND
+/// the config is unreadable (`0000`, the non-root default-install
+/// shape), `aimx hooks list | create | delete` must surface the
+/// actionable daemon-down hint — not a raw `Permission denied`
+/// (os error 13) from the eager config read, and not a confusing EACCES
+/// from a doomed direct-config-edit fallback the non-root caller cannot
+/// perform. This guards the SocketMissing branch in `hooks.rs`'s
+/// `list_via_daemon` / `create` / `delete_via_daemon`, which routes
+/// through the canonical `NotRoot` auth error plus
+/// `append_daemon_down_hint`.
+#[cfg(unix)]
+#[test]
+fn cli_hooks_daemon_down_non_root_emits_hint_not_eacces() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!(
+            "skipping: chmod 0000 has no effect on root, and root falls back to a direct edit"
+        );
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    // Empty runtime dir => no `aimx.sock` => daemon-down condition. We
+    // never start `aimx serve`, so the UDS connect fails with
+    // SocketMissing rather than a daemon-side error.
+    let runtime = tmp.path().join("run");
+    std::fs::create_dir_all(&runtime).unwrap();
+    let sock = runtime.join("aimx.sock");
+    assert!(!sock.exists(), "no daemon should be running for this test");
+
+    use std::os::unix::fs::PermissionsExt;
+    let config_path = tmp.path().join("config.toml");
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    // Assert that a command's stderr carries the daemon-down hint and
+    // never leaks a raw EACCES. Each subcommand shares the same
+    // SocketMissing rendering, so they all get the same treatment.
+    let assert_hint = |label: &str, args: &[&str]| {
+        let assert = aimx_cmd_daemon(tmp.path())
+            .arg("--data-dir")
+            .arg(tmp.path())
+            .args(args)
+            .assert()
+            .failure();
+        let out = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+        let err = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+        assert!(
+            !out.contains("Permission denied") && !err.contains("Permission denied"),
+            "{label} must not surface EACCES; stdout={out} stderr={err}"
+        );
+        // The canonical NotRoot rendering ("... requires root (run with
+        // sudo)") plus the appended daemon-down hint ("if the daemon is
+        // running ...") together form the actionable message. Assert on
+        // the substrings the code actually emits.
+        assert!(
+            err.contains("sudo") && err.contains("if the daemon is running"),
+            "{label} must surface the actionable daemon-down hint; stderr={err}"
+        );
+    };
+
+    assert_hint("hooks list", &["hooks", "list"]);
+    assert_hint(
+        "hooks create",
+        &[
+            "hooks",
+            "create",
+            "--mailbox",
+            "alice",
+            "--event",
+            "on_receive",
+            "--cmd",
+            r#"["/bin/true"]"#,
+            "--name",
+            "cli_daemon_down_hook",
+        ],
+    );
+    assert_hint("hooks delete", &["hooks", "delete", "--yes", "some_hook"]);
+
+    // The doomed fallback never ran: the unreadable config is untouched.
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o640)).unwrap();
+}
+
 /// Cycle 2 regression guard for Blocker 2: the MCP `mailbox_create`
 /// tool must work end-to-end against a real daemon for a non-root
 /// caller. Cycle 1 shipped the tool but the wire-protocol parser

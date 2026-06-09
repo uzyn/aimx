@@ -597,8 +597,10 @@ pub struct HookCreateArgs {
     /// string (e.g. `--cmd '["/bin/echo", "hello"]'`). The first element
     /// must be an absolute path; there is no implicit shell wrapping.
     /// Spell out `/bin/sh -c "..."` explicitly when shell expansion is
-    /// needed. Hook creation requires root: it writes to
-    /// `/etc/aimx/config.toml` directly and sends SIGHUP to `aimx serve`.
+    /// needed. A mailbox owner can create hooks without sudo when the
+    /// daemon is running (it hot-swaps via the `HOOK-CREATE` UDS verb);
+    /// the root-only direct `config.toml` edit + restart is the fallback
+    /// for when the daemon is stopped.
     #[arg(long)]
     pub cmd: String,
 
