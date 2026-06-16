@@ -62,7 +62,7 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 comrak = { version = "=0.52.0", default-features = false }
 lol_html = "3"
 tempfile = "3"
-sparkv = "0.1"
+sparkv = "0.2"
 
 [dev-dependencies]
 assert_cmd = "2"

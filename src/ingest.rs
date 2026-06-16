@@ -369,7 +369,7 @@ pub fn ingest_email(
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let cache = cache_guard.get_or_insert_with(|| build_dedup_cache_from_disk(&inbox_dir));
-        if cache.get(&message_id).is_some() {
+        if cache.contains_key(&message_id) {
             tracing::info!(
                 target: "aimx::ingest",
                 "duplicate message_id, skipping rcpt={rcpt} mailbox={mailbox} message_id={message_id}",
@@ -506,13 +506,13 @@ pub fn ingest_email(
             // check is belt-and-braces against the cache's `set_with_ttl`
             // returning `Err(ItemSizeExceeded)` and silently dropping the
             // dedup record.
-            let value: &str = if meta.id.len() <= DEDUP_MAX_VALUE_SIZE {
-                meta.id.as_str()
+            let value: String = if meta.id.len() <= DEDUP_MAX_VALUE_SIZE {
+                meta.id.clone()
             } else {
-                ""
+                String::new()
             };
             if let Err(e) = cache.set_with_ttl(&meta.message_id, value, DEDUP_TTL) {
-                // Failure mode at scale: SparKV returns `Err(MaxItemsExceeded)`
+                // Failure mode at scale: SparKV returns `Err(CapacityExceeded)`
                 // when this mailbox accumulates more than `DEDUP_MAX_ITEMS`
                 // (100k) live entries inside the 24h window — roughly 1.2
                 // sustained inbound messages/second per mailbox, which is
@@ -659,7 +659,11 @@ fn build_dedup_cache_from_disk(inbox_dir: &Path) -> sparkv::SparKV {
         }
         let remaining = total - elapsed;
         let remaining_secs = remaining.num_seconds().max(1) as u64;
-        let _ = kv.set_with_ttl(&msg_id, "loaded", Duration::from_secs(remaining_secs));
+        let _ = kv.set_with_ttl(
+            &msg_id,
+            "loaded".to_string(),
+            Duration::from_secs(remaining_secs),
+        );
     }
     kv
 }
@@ -757,7 +761,7 @@ fn parse_toml_string_value(after_key: &str) -> Option<String> {
 fn make_dedup_sparkv() -> sparkv::SparKV {
     let mut config = sparkv::Config::new();
     config.max_items = DEDUP_MAX_ITEMS;
-    config.max_item_size = DEDUP_MAX_VALUE_SIZE;
+    config.max_item_size = Some(DEDUP_MAX_VALUE_SIZE);
     config.max_ttl = DEDUP_TTL;
     config.default_ttl = DEDUP_TTL;
     config.auto_clear_expired = true;

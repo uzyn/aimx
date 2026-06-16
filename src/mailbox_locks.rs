@@ -83,7 +83,7 @@ pub struct MailboxState {
     /// Message-Id dedup cache. `None` until the first ingest into this
     /// mailbox after daemon startup; populated lazily from disk on
     /// first use. Wrapped in `std::sync::Mutex` because `SparKV`
-    /// mutates on every read/write.
+    /// writes take `&mut self`.
     pub seen_message_ids: Mutex<Option<sparkv::SparKV>>,
 }
 

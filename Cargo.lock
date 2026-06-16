@@ -2742,9 +2742,9 @@ dependencies = [
 
 [[package]]
 name = "sparkv"
-version = "0.1.1"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e3eef4e6fb0a66200df893d1292b96cb92e4f8a43864fd938ba2f96cd345c40"
+checksum = "98a10d99f717743724a8bbf127db24ba4281104dde9534ebcae81c2c8e06219e"
 
 [[package]]
 name = "spin"
