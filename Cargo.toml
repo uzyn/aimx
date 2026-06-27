@@ -32,7 +32,7 @@ uuid = { version = "1", features = ["v4"] }
 html2text = "0.17"
 rsa = { version = "0.9", features = ["pem"] }
 base64 = "0.22"
-mail-auth = "0.9"
+mail-auth = "0.10"
 mime_guess = "2"
 rmcp = { version = "1.7.0", features = ["server", "transport-io"] }
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "io-util", "io-std", "net", "time", "sync", "signal"] }
