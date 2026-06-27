@@ -27,7 +27,7 @@ jobs:
       # Third-party actions are pinned by full commit SHA for supply-chain
       # safety; the trailing comment names the human-readable version so
       # `dependabot`/`renovate` (and humans) can bump them in lockstep.
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Resolve version string
         id: version
@@ -50,7 +50,7 @@ jobs:
       # Use `taiki-e/install-action` to pull a prebuilt `cross` binary
       # into `~/.cargo/bin` instead of recompiling it from source on
       # every matrix shard (saved ~1–2 min per leg).
-      - uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+      - uses: taiki-e/install-action@bffeee26d4db9be238a4ea78d8826604ebcb594d # v2.82.5
         with:
           tool: cross@0.2.5
 
@@ -107,7 +107,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
 
@@ -284,7 +284,7 @@ jobs:
           fi
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: aimx ${{ steps.version.outputs.tag }}
