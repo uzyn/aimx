@@ -72,4 +72,4 @@ rcgen = "0.14"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
 tracing-test = "0.2"
 serial_test = "3"
-syn = { version = "2", features = ["full", "visit"] }
+syn = { version = "3", features = ["full", "visit"] }
