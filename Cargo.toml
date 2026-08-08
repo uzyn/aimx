@@ -31,7 +31,7 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 html2text = "0.17"
 rsa = { version = "0.9", features = ["pem"] }
-base64 = "0.22"
+base64 = "0.23"
 mail-auth = "0.10"
 mime_guess = "2"
 rmcp = { version = "2.1.0", features = ["server", "transport-io"] }
