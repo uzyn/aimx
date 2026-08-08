@@ -59,7 +59,7 @@ console = { version = "0.16", default-features = false, features = ["ansi-parsin
 ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots", "gzip", "json"] }
 tar = "0.4"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
-comrak = { version = "=0.53.0", default-features = false }
+comrak = { version = "=0.54.0", default-features = false }
 lol_html = "3"
 tempfile = "3"
 sparkv = "0.2"
