@@ -50,7 +50,7 @@ jobs:
       # Use `taiki-e/install-action` to pull a prebuilt `cross` binary
       # into `~/.cargo/bin` instead of recompiling it from source on
       # every matrix shard (saved ~1–2 min per leg).
-      - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
+      - uses: taiki-e/install-action@e67fa11c4b9316fa714ddf0abed07a0c3143b95b # v2.87.4
         with:
           tool: cross@0.2.5
 
@@ -284,7 +284,7 @@ jobs:
           fi
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: aimx ${{ steps.version.outputs.tag }}
